@@ -19,7 +19,7 @@ import { CardForm, booleanField, secretField, textField, type CardActions, type 
 import { ChannelsForm, type ChannelDraft, type ChannelsFormActions, type ChannelsFormState } from './channels-form.ts'
 import type { ImageGenScope } from './settings-scope.ts'
 import { describeModel } from '../model-catalog.ts'
-import { IMAGE_MODEL_API, PRESETS_API, PROMPT_ENHANCE_API, USAGE_API, CANVAS_SKILL_API, type ModelMapping, type PresetProviderView } from '../protocol.ts'
+import { IMAGE_MODEL_API, PRESETS_API, PROMPT_ENHANCE_API, USAGE_API, CANVAS_SKILL_API, type ComfyUiWorkflowEntry, type ComfyUiWorkflowFolder, type ComfyUiWorkflowList, type ModelMapping, type PresetProviderView } from '../protocol.ts'
 import type { ImageGenKey } from './locales.ts'
 import { tt, type TranslateValues } from './helpers.ts'
 import { useImageGenLanguageTick } from './use-language.ts'
@@ -235,6 +235,7 @@ export function ImageGenSettingsCard(props: ImageGenSettingsCardProps) {
   // Channel list local states.
   const [editingId, setEditingId] = useState<string | null>(null)
   const [presetPickerOpen, setPresetPickerOpen] = useState(false)
+  const [comfyUiPickerOpen, setComfyUiPickerOpen] = useState(false)
   const [presets, setPresets] = useState<PresetProviderView[]>([])
   const [presetError, setPresetError] = useState<string | null>(null)
   const [usage, setUsage] = useState<UsageCounters | null>(null)
@@ -325,7 +326,11 @@ export function ImageGenSettingsCard(props: ImageGenSettingsCardProps) {
                   <ul className={css.channelList}>
                     {channels.map(channel => {
                       const keyHeld = state.channels.keySet[channel.id] === true
-                      const ready = keyHeld && channel.models.length > 0
+                      const keyOptional = isComfyUiPreset(channel.preset)
+                      // ComfyUI channels treat the API key as optional, so
+                      // "no key stored" does not make the channel incomplete.
+                      // A ComfyUI channel is ready when it has at least one model.
+                      const ready = keyOptional ? channel.models.length > 0 : (keyHeld && channel.models.length > 0)
                       const isDefault = channel.id === state.channels.defaultChannelId
                       if (confirmDeleteId === channel.id) {
                         return (
@@ -342,8 +347,10 @@ export function ImageGenSettingsCard(props: ImageGenSettingsCardProps) {
                           <button type="button" className={css.channelMain} disabled={disabled} onClick={() => { setEditingId(channel.id) }}>
                             <span className={css.channelName}>{isDefault ? `★ ${channel.name || t('channels.untitled')}` : (channel.name || t('channels.untitled'))}</span>
                             <span className={css.channelMeta}>
-                              <span className={css.channelBadge} data-warn={!keyHeld || channel.models.length === 0 ? '' : undefined}>
-                                {keyHeld ? t('channels.keySet') : t('channels.keyMissing')}
+                              <span className={css.channelBadge} data-warn={(!keyOptional && !keyHeld) || channel.models.length === 0 ? '' : undefined}>
+                                {keyOptional
+                                  ? t('channels.comfyuiKeyOptional')
+                                  : (keyHeld ? t('channels.keySet') : t('channels.keyMissing'))}
                                 {' · '}
                                 {channel.models.length > 0 ? t('channels.modelCount', { n: channel.models.length }) : t('channels.noModels')}
                               </span>
@@ -360,7 +367,7 @@ export function ImageGenSettingsCard(props: ImageGenSettingsCardProps) {
               {open && presetPickerOpen ? (
                 <PresetPicker
                   t={t}
-                  presets={presets}
+                  presets={presets.filter(preset => !isComfyUiPreset(preset.id))}
                   error={presetError}
                   disabled={state.writable === false}
                   onLoad={() => {
@@ -388,9 +395,39 @@ export function ImageGenSettingsCard(props: ImageGenSettingsCardProps) {
                   onClose={() => { setPresetPickerOpen(false) }}
                 />
               ) : null}
+              {open && comfyUiPickerOpen ? (
+                <ComfyUiPicker
+                  t={t}
+                  presets={presets.filter(preset => isComfyUiPreset(preset.id))}
+                  error={presetError}
+                  disabled={state.writable === false}
+                  onLoad={() => {
+                    setPresetError(null)
+                    // Reuse the cached presets list if it already loaded, so
+                    // opening the ComfyUI picker twice in a row never double-fetches.
+                    if (presets.length === 0) {
+                      void fetch(PRESETS_API, { method: 'POST' })
+                        .then(async response => {
+                          const body = await response.json() as { ok?: boolean; presets?: PresetProviderView[]; message?: string }
+                          if (!response.ok || body.ok !== true || body.presets === undefined) throw new Error(body.message ?? `HTTP ${response.status}`)
+                          setPresets(body.presets)
+                        })
+                        .catch(error => { setPresetError(error instanceof Error ? error.message : String(error)) })
+                    }
+                  }}
+                  onPick={(preset) => {
+                    const draft = newChannelDraft(preset)
+                    props.channels.setChannels([...channels, draft])
+                    setComfyUiPickerOpen(false)
+                    setEditingId(draft.id)
+                  }}
+                  onClose={() => { setComfyUiPickerOpen(false) }}
+                />
+              ) : null}
 
               <div className={css.channelAddRow}>
                 <button type="button" className={css.channelAdd} disabled={disabled} onClick={() => { setPresetError(null); setPresetPickerOpen(true) }}>+ {t('channels.addProvider')}</button>
+                <button type="button" className={css.channelAdd} disabled={disabled} onClick={() => { setPresetError(null); setComfyUiPickerOpen(true) }}>+ {t('channels.addComfyui')}</button>
                 <button type="button" className={css.channelAdd} disabled={disabled} onClick={() => { addCustomChannel(channels, props.channels, setEditingId) }}>+ {t('channels.addCustom')}</button>
               </div>
               </div>
@@ -817,6 +854,22 @@ function newChannelDraft(preset: PresetProviderView | undefined): ChannelDraft {
   }
 }
 
+/** Whether the channel was created from a ComfyUI preset (preset id starts with `comfyui-`).
+ *  ComfyUI channels treat the API key as optional: most local installations have no auth,
+ *  and remote ones using a reverse proxy may carry a Bearer token. The editor surfaces this
+ *  as a softer "key is optional" hint rather than the usual "key is required" copy. */
+function isComfyUiPreset(presetId: string): boolean {
+  return /^comfyui-/i.test(presetId.trim())
+}
+
+/** Result of the image-models detection call, branched by the channel preset.
+ *  - `openai`:  flat list of upstream model ids (default).
+ *  - `comfyui`: folder-grouped workflow listing (ComfyUI preset only).
+ */
+type ModelCandidates =
+  | { kind: 'openai'; models: string[] }
+  | { kind: 'comfyui'; folders: ComfyUiWorkflowFolder[]; total: number }
+
 function addCustomChannel(channels: ChannelDraft[], form: ChannelsFormActions, openEditor: (id: string) => void): void {
   const draft = newChannelDraft(undefined)
   form.setChannels([...channels, draft])
@@ -877,6 +930,141 @@ function PresetPicker(props: {
   )
 }
 
+/** ComfyUI sub-picker: only the `comfyui-*` presets are shown. Hosted as a
+ *  separate "添加 ComfyUI 服务" button next to the generic add-provider so the
+ *  ComfyUI option is discoverable without having to scroll past the regular
+ *  cloud providers. Includes a quick connectivity probe so the user can
+ *  verify the address is reachable *before* committing to a preset. */
+function ComfyUiPicker(props: {
+  t: (key: ImageGenKey, params?: Record<string, string | number>) => string
+  presets: PresetProviderView[]
+  error: string | null
+  disabled: boolean
+  onLoad: () => void
+  onPick: (preset: PresetProviderView) => void
+  onClose: () => void
+}) {
+  const { t } = props
+  const loadedRef = useRef(false)
+  useEffect(() => {
+    if (loadedRef.current) return
+    loadedRef.current = true
+    props.onLoad()
+  }, [])
+
+  // The default URL pre-fills from the first preset (typically the local one
+  // pointing at 127.0.0.1:8188). The probe reuses the same `/image-models`
+  // route the channel editor calls, so the result is exactly what the user
+  // would see after creating the channel and clicking "Detect".
+  const initialUrl = props.presets[0]?.apiUrl ?? 'http://127.0.0.1:8188'
+  const [probeUrl, setProbeUrl] = useState(initialUrl)
+  const [probing, setProbing] = useState(false)
+  const [probeResult, setProbeResult] = useState<{ ok: boolean; message: string } | null>(null)
+
+  // Keep the URL in sync when the preset list finishes loading (the first
+  // render usually has an empty list until the fetch resolves).
+  useEffect(() => {
+    if (probeUrl.trim() === '' && props.presets[0]?.apiUrl !== undefined) {
+      setProbeUrl(props.presets[0].apiUrl)
+    }
+  }, [props.presets])
+
+  const probe = (): void => {
+    const url = probeUrl.trim()
+    if (url === '') return
+    setProbing(true)
+    setProbeResult(null)
+    void fetch(IMAGE_MODEL_API.models, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      // `probeOnly: true` makes the route return a connectivity probe
+      // (POST /prompt) instead of the full workflow listing — appropriate
+      // for the picker, which runs before any channel is saved.
+      body: JSON.stringify({ apiUrl: url, forceKind: 'comfyui', probeOnly: true }),
+    })
+      .then(async response => {
+        const body = await response.json() as {
+          ok?: boolean
+          kind?: 'openai' | 'comfyui'
+          probe?: { reachable: boolean; message: string; httpStatus?: number }
+          message?: string
+          code?: string
+        }
+        if (!response.ok || body.ok !== true) {
+          setProbeResult({ ok: false, message: body.message ?? `HTTP ${response.status}` })
+          return
+        }
+        if (body.kind === 'comfyui' && body.probe !== undefined) {
+          setProbeResult({ ok: body.probe.reachable, message: body.probe.message })
+          return
+        }
+        // Should not happen — picker always force-casts to ComfyUI.
+        setProbeResult({ ok: false, message: t('channels.comfyuiProbeNotComfyui') })
+      })
+      .catch(error => {
+        setProbeResult({ ok: false, message: error instanceof Error ? error.message : String(error) })
+      })
+      .finally(() => { setProbing(false) })
+  }
+
+  return (
+    <section className={css.presetInline} aria-label={t('channels.comfyuiPickerTitle')}>
+      <header className={css.presetInlineHeader}>
+        <div>
+          <h3 className={css.sectionTitle}>{t('channels.comfyuiPickerTitle')}</h3>
+          <p className={css.sectionHint}>{t('channels.comfyuiPickerHint')}</p>
+        </div>
+        <button type="button" className={css.editorClose} aria-label={t('preview.close')} onClick={props.onClose}>×</button>
+      </header>
+
+      {/* Connectivity probe — verify the URL is reachable *before* picking a
+          preset, so the user does not commit to a broken address. */}
+      <div className={css.manualModelRow}>
+        <input
+          className={css.input}
+          value={probeUrl}
+          placeholder="http://127.0.0.1:8188"
+          disabled={probing}
+          onChange={event => { setProbeUrl(event.target.value); setProbeResult(null) }}
+          onKeyDown={event => { if (event.key === 'Enter') { event.preventDefault(); probe() } }}
+        />
+        <button
+          type="button"
+          className={css.modelFetch}
+          disabled={probing || probeUrl.trim() === ''}
+          onClick={probe}
+        >
+          {probing ? t('channels.detecting') : t('channels.comfyuiProbe')}
+        </button>
+      </div>
+      {probeResult !== null
+        ? (
+          <p
+            className={probeResult.ok ? css.detectOk : css.failed}
+            role="status"
+          >
+            {probeResult.ok
+              ? `✓ ${probeResult.message}`
+              : `× ${probeResult.message}`}
+          </p>
+        )
+        : null}
+
+      <div className={css.presetList}>
+        {props.presets.length === 0
+          ? <p className={css.sectionHint}>{t('channels.comfyuiPickerEmpty')}</p>
+          : props.presets.map(preset => (
+              <button key={preset.id} type="button" className={css.presetRow} disabled={props.disabled} onClick={() => { props.onPick(preset) }}>
+                <span className={css.presetName}>{preset.name}</span>
+                <span className={css.presetMeta}>{preset.models.map(model => model.alias).join(' · ')}</span>
+              </button>
+            ))}
+        {props.error !== null ? <p className={css.failed} role="status">{t('channels.presetLoadFailed', { error: props.error })}</p> : null}
+      </div>
+    </section>
+  )
+}
+
 /** Channel editor (modal): key, display name, API URL, model catalog. */
 function ChannelEditor(props: {
   t: (key: ImageGenKey, params?: Record<string, string | number>) => string
@@ -895,17 +1083,64 @@ function ChannelEditor(props: {
 }) {
   const { t, channel } = props
   const [keyDraft, setKeyDraft] = useState('')
-  const [candidates, setCandidates] = useState<string[] | null>(null)
+  const [candidates, setCandidates] = useState<ModelCandidates | null>(null)
   const [detecting, setDetecting] = useState(false)
   const [detectError, setDetectError] = useState<string | null>(null)
   const [manualId, setManualId] = useState('')
   const [removeOpen, setRemoveOpen] = useState(false)
   const [copyFrom, setCopyFrom] = useState('')
+  // ComfyUI candidate folders are collapsed by default; only the root folder
+  // is expanded to keep the dialog scannable. Users can click to expand.
+  const [collapsedFolders, setCollapsedFolders] = useState<Set<string>>(new Set())
 
   const generatedCount = (alias: string): number => {
     if (props.usage === null) return 0
     const channelBucket = props.usage.byChannel[channel.id] ?? props.usage.byChannel[`name:${channel.name}`] ?? {}
     return channelBucket[alias] ?? props.usage.totals[alias] ?? 0
+  }
+
+  // ComfyUI presets treat the API key as optional; detection works without one.
+  const comfyUi = isComfyUiPreset(channel.preset)
+
+  /** Add one candidate workflow to the channel's model catalog as
+   *  `comfyui:<folder>/<name>`. Existing entries with the same alias are
+   *  not duplicated. */
+  const addComfyUiWorkflow = (entry: ComfyUiWorkflowEntry): void => {
+    const id = `comfyui:${entry.path}`
+    if (channel.models.some(model => model.alias === id)) return
+    props.onSetModels([...channel.models, { alias: id, id }])
+  }
+
+  const toggleFolder = (folderKey: string): void => {
+    setCollapsedFolders(prev => {
+      const next = new Set(prev)
+      if (next.has(folderKey)) next.delete(folderKey)
+      else next.add(folderKey)
+      return next
+    })
+  }
+
+  /** Group the channel's already-added models by ComfyUI folder (workflow
+   *  id starts with `comfyui:` and the remainder encodes the path). Falls
+   *  back to a single "已添加" bucket for non-ComfyUI presets. */
+  const groupedSelected = (): Array<{ folder: string; items: Array<{ index: number; model: ModelMapping }> }> => {
+    if (!comfyUi) return [{ folder: '', items: channel.models.map((m, i) => ({ index: i, model: m })) }]
+    const buckets = new Map<string, Array<{ index: number; model: ModelMapping }>>()
+    channel.models.forEach((model, index) => {
+      const id = model.id.startsWith('comfyui:') ? model.id.slice('comfyui:'.length) : model.id
+      const folder = id.includes('/') ? id.split('/')[0]! : ''
+      const bucket = buckets.get(folder) ?? []
+      bucket.push({ index, model })
+      buckets.set(folder, bucket)
+    })
+    const out: Array<{ folder: string; items: Array<{ index: number; model: ModelMapping }> }> = []
+    for (const [folder, items] of buckets.entries()) out.push({ folder, items })
+    out.sort((a, b) => {
+      if (a.folder === '' && b.folder !== '') return -1
+      if (a.folder !== '' && b.folder === '') return 1
+      return a.folder.localeCompare(b.folder)
+    })
+    return out
   }
 
   const detect = (): void => {
@@ -914,11 +1149,25 @@ function ChannelEditor(props: {
     const payload: Record<string, unknown> = { channelId: channel.id }
     if (channel.apiUrl.trim() !== '') payload.apiUrl = channel.apiUrl.trim()
     if (keyDraft.trim() !== '') payload.apiKey = keyDraft.trim()
+    // Force the dispatch to ComfyUI when the channel was created from a
+    // comfyui-* preset, so even old saved channels whose `preset` field
+    // never landed in settings still take the right code path.
+    payload.forceKind = isComfyUiPreset(channel.preset) ? 'comfyui' : 'openai'
     void fetch(IMAGE_MODEL_API.models, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(payload) })
       .then(async response => {
-        const body = await response.json() as { ok?: boolean; models?: string[]; message?: string }
+        const body = await response.json() as {
+          ok?: boolean
+          kind?: 'openai' | 'comfyui'
+          models?: string[]
+          workflows?: ComfyUiWorkflowList
+          message?: string
+        }
         if (!response.ok || body.ok !== true) throw new Error(body.message ?? `HTTP ${response.status}`)
-        setCandidates(body.models ?? [])
+        if (body.kind === 'comfyui' && body.workflows !== undefined) {
+          setCandidates({ kind: 'comfyui', folders: body.workflows.folders, total: body.workflows.total })
+          return
+        }
+        setCandidates({ kind: 'openai', models: body.models ?? [] })
       })
       .catch(error => { setDetectError(error instanceof Error ? error.message : String(error)) })
       .finally(() => { setDetecting(false) })
@@ -929,7 +1178,7 @@ function ChannelEditor(props: {
   useEffect(() => {
     if (autoDetected.current) return
     autoDetected.current = true
-    if (channel.apiUrl.trim() !== '' && (props.keyHeld || keyDraft.trim() !== '')) detect()
+    if (channel.apiUrl.trim() !== '' && (comfyUi || props.keyHeld || keyDraft.trim() !== '')) detect()
   }, [])
 
   const addManual = (): void => {
@@ -994,50 +1243,199 @@ function ChannelEditor(props: {
             type="password"
             autoComplete="off"
             value={keyDraft}
-            placeholder={props.keyHeld ? t('channels.keyReplaceHint') : t('channels.keyMissingHint')}
+            placeholder={props.keyHeld ? t('channels.keyReplaceHint') : (comfyUi ? t('channels.comfyuiKeyOptionalHint') : t('channels.keyMissingHint'))}
             disabled={!props.writable}
             onChange={event => { const value = event.target.value; setKeyDraft(value); props.onSetKey(value === '' ? undefined : value) }}
           />
+          {comfyUi ? <p className={css.sectionHint}>{t('channels.comfyuiKeyNote')}</p> : null}
         </div>
 
         <div className={css.editorDivider} />
 
         <div className={css.editorSectionHeader}>
-          <h4 className={css.label}>{t('channels.modelCatalogTitle')}</h4>
-          <button type="button" className={css.modelFetch} disabled={!props.writable || detecting} onClick={detect}>
+          <h4 className={css.label}>{comfyUi ? t('channels.comfyuiWorkflowCatalogTitle') : t('channels.modelCatalogTitle')}</h4>
+          <button
+            type="button"
+            className={css.modelFetch}
+            disabled={!props.writable || detecting || channel.apiUrl.trim() === ''}
+            onClick={detect}
+          >
             {detecting ? t('channels.detecting') : t('channels.detect')}
           </button>
         </div>
+        {comfyUi
+          ? <p className={css.sectionHint}>{t('channels.comfyuiModelHint')}</p>
+          : null}
         {detectError !== null ? <p className={css.failed} role="status">{t('channels.detectFailed', { error: detectError })}</p> : null}
-        {candidates !== null && detectError === null ? <p className={css.detectOk} role="status">{t('channels.detectSuccess', { n: candidates.length })}</p> : null}
+        {candidates !== null && detectError === null
+          ? (
+            <p className={css.detectOk} role="status">
+              {candidates.kind === 'comfyui'
+                ? t('channels.comfyuiDetectOk', { n: candidates.total })
+                : t('channels.detectSuccess', { n: candidates.models.length })}
+            </p>
+          )
+          : null}
 
+        {/* Candidate listing (after a successful detection). ComfyUI shows
+            folder-grouped workflows; other providers show a flat id list. The
+            un-grouped (root) bucket has no header — its workflows are listed
+            at the top of the candidate list so users don't see a "Root" tier
+            they would never intentionally create. */}
+        {candidates?.kind === 'comfyui'
+          ? (
+            <ul className={css.modelRows} aria-label={t('channels.candidatesTitle')}>
+              {candidates.folders.map(folder => {
+                const renderRow = (workflow: ComfyUiWorkflowEntry): JSX.Element => {
+                  const candidateId = `comfyui:${workflow.path}`
+                  const alreadyAdded = channel.models.some(model => model.alias === candidateId)
+                  return (
+                    <li key={workflow.id} className={css.modelRow} data-candidate>
+                      <span className={css.modelRowInfo}>
+                        <span className={css.modelRowName}>{workflow.name}</span>
+                        <span className={css.modelRowPath}>{workflow.path}</span>
+                      </span>
+                      <button
+                        type="button"
+                        className={css.addModel}
+                        disabled={!props.writable || alreadyAdded}
+                        onClick={() => { addComfyUiWorkflow(workflow) }}
+                      >
+                        {alreadyAdded ? t('channels.comfyuiAlreadyAdded') : t('channels.comfyuiAddWorkflow')}
+                      </button>
+                    </li>
+                  )
+                }
+                // Root bucket: no header, workflows listed inline at the top.
+                if (folder.name === '') {
+                  return (
+                    <li key="__root__" className={css.modelRootBucket}>
+                      {folder.workflows.map(workflow => renderRow(workflow))}
+                    </li>
+                  )
+                }
+                const folderKey = folder.name
+                const collapsed = collapsedFolders.has(folderKey)
+                return (
+                  <li key={folderKey} className={css.modelFolder}>
+                    <button
+                      type="button"
+                      className={css.modelFolderHeader}
+                      aria-expanded={!collapsed}
+                      onClick={() => { toggleFolder(folderKey) }}
+                    >
+                      <span aria-hidden="true">{collapsed ? '▶' : '▼'}</span>
+                      <span className={css.modelFolderName}>{folder.name}</span>
+                      <span className={css.modelFolderCount}>{folder.workflows.length}</span>
+                    </button>
+                    {!collapsed
+                      ? (
+                        <ul className={css.modelFolderList}>
+                          {folder.workflows.map(workflow => renderRow(workflow))}
+                        </ul>
+                      )
+                      : null}
+                  </li>
+                )
+              })}
+            </ul>
+          )
+          : null}
+
+        {candidates?.kind === 'openai' && candidates.models.length > 0
+          ? (
+            <ul className={css.modelRows} aria-label={t('channels.candidatesTitle')}>
+              {candidates.models.map(modelId => (
+                <li key={modelId} className={css.modelRow} data-candidate>
+                  <span className={css.modelRowInfo}>
+                    <span className={css.modelRowName}>{modelId}</span>
+                  </span>
+                  <button
+                    type="button"
+                    className={css.addModel}
+                    disabled={!props.writable || channel.models.some(model => model.alias === modelId)}
+                    onClick={() => {
+                      const id = modelId
+                      if (channel.models.some(model => model.alias === id)) return
+                      props.onSetModels([...channel.models, { alias: id, id }])
+                    }}
+                  >
+                    {t('channels.addModelConfirm')}
+                  </button>
+                </li>
+              ))}
+            </ul>
+          )
+          : null}
+
+        {/* Selected models (the persisted catalog). Grouped by folder for ComfyUI;
+            the un-grouped (root) bucket is rendered inline with no header so users
+            don't see a "Root" tier they would never intentionally create. */}
         {channel.models.length === 0
-          ? <p className={css.sectionHint}>{t('channels.noModelsHint')}</p>
+          ? <p className={css.sectionHint}>{comfyUi ? t('channels.comfyuiNoModelsHint') : t('channels.noModelsHint')}</p>
           : (
             <ul className={css.modelRows}>
-              {channel.models.map((model, index) => {
-                const entry = describeModel(model.id || model.alias)
-                const generated = generatedCount(model.alias)
+              {groupedSelected().map(group => {
+                const groupKey = group.folder === '' ? '__selected_root__' : group.folder
+                const collapsed = collapsedFolders.has(groupKey)
+                const renderItem = ({ index, model }: { index: number; model: ModelMapping }): JSX.Element => {
+                  const entry = describeModel(model.id || model.alias)
+                  const generated = generatedCount(model.alias)
+                  return (
+                    <li key={`${model.alias}-${index}`} className={css.modelRow}>
+                      <div className={css.modelRowInputs}>
+                        <input className={css.input} value={model.alias} aria-label={t('channels.modelAliasLabel')} disabled={!props.writable} onChange={event => {
+                          const next = [...channel.models]
+                          next[index] = { ...model, alias: event.target.value }
+                          props.onSetModels(next)
+                        }} />
+                        <span className={css.modelArrow}>→</span>
+                        <input className={css.input} value={model.id} aria-label={t('channels.modelIdLabel')} disabled={!props.writable} onChange={event => {
+                          const next = [...channel.models]
+                          next[index] = { ...model, id: event.target.value }
+                          props.onSetModels(next)
+                        }} />
+                      </div>
+                      <div className={css.modelRowBadges}>
+                        <span className={css.modelBadge}>{entry.labelZh}{entry.known ? '' : ` · ${t('channels.unknownProtocol')}`}</span>
+                        {generated > 0 ? <span className={css.modelBadge} data-verified>{t('channels.generated', { n: generated })}</span> : null}
+                        <button type="button" className={css.modelRowRemove} disabled={!props.writable} aria-label={`${t('channels.removeModel')}: ${model.alias}`} onClick={() => { props.onSetModels(channel.models.filter((_, i) => i !== index)) }}>×</button>
+                      </div>
+                    </li>
+                  )
+                }
+                // Root bucket (no folder key in the alias): render inline with
+                // no header and never collapse.
+                if (group.folder === '') {
+                  return (
+                    <li key="__selected_root__" className={css.modelRootBucket}>
+                      {group.items.map(item => renderItem(item))}
+                    </li>
+                  )
+                }
                 return (
-                  <li key={`${model.alias}-${index}`} className={css.modelRow}>
-                    <div className={css.modelRowInputs}>
-                      <input className={css.input} value={model.alias} aria-label={t('channels.modelAliasLabel')} disabled={!props.writable} onChange={event => {
-                        const next = [...channel.models]
-                        next[index] = { ...model, alias: event.target.value }
-                        props.onSetModels(next)
-                      }} />
-                      <span className={css.modelArrow}>→</span>
-                      <input className={css.input} value={model.id} aria-label={t('channels.modelIdLabel')} disabled={!props.writable} onChange={event => {
-                        const next = [...channel.models]
-                        next[index] = { ...model, id: event.target.value }
-                        props.onSetModels(next)
-                      }} />
-                    </div>
-                    <div className={css.modelRowBadges}>
-                      <span className={css.modelBadge}>{entry.labelZh}{entry.known ? '' : ` · ${t('channels.unknownProtocol')}`}</span>
-                      {generated > 0 ? <span className={css.modelBadge} data-verified>{t('channels.generated', { n: generated })}</span> : null}
-                      <button type="button" className={css.modelRowRemove} disabled={!props.writable} aria-label={`${t('channels.removeModel')}: ${model.alias}`} onClick={() => { props.onSetModels(channel.models.filter((_, i) => i !== index)) }}>×</button>
-                    </div>
+                  <li key={groupKey} className={css.modelFolder}>
+                    {comfyUi
+                      ? (
+                        <button
+                          type="button"
+                          className={css.modelFolderHeader}
+                          aria-expanded={!collapsed}
+                          onClick={() => { toggleFolder(groupKey) }}
+                        >
+                          <span aria-hidden="true">{collapsed ? '▶' : '▼'}</span>
+                          <span className={css.modelFolderName}>{group.folder}</span>
+                          <span className={css.modelFolderCount}>{group.items.length}</span>
+                        </button>
+                      )
+                      : <h5 className={css.label}>{t('channels.modelCatalogTitle')}</h5>}
+                    {!collapsed
+                      ? (
+                        <ul className={css.modelFolderList}>
+                          {group.items.map(item => renderItem(item))}
+                        </ul>
+                      )
+                      : null}
                   </li>
                 )
               })}
@@ -1061,30 +1459,6 @@ function ChannelEditor(props: {
             </div>
           ) : null}
         </div>
-
-        {candidates !== null && candidates.length > 0 ? (
-          <div className={css.modelCandidateList}>
-            <span className={css.modelCandidateLabel}>
-              {t('channels.candidatesTitle')}
-            </span>
-            {candidates.map(candidate => {
-              const selected = channel.models.some(model => model.alias === candidate)
-              const entry = describeModel(candidate)
-              return (
-                <label key={candidate} className={css.modelCandidate} data-selected={selected ? '' : undefined}>
-                  <input type="checkbox" checked={selected} disabled={!props.writable} onChange={() => {
-                    const merged = selected
-                      ? channel.models.filter(model => model.alias !== candidate)
-                      : [...channel.models, { alias: candidate, id: candidate }]
-                    props.onSetModels(merged)
-                  }} />
-                  <span>{candidate}</span>
-                  {!entry.known ? <span className={css.modelBadge} data-warn>{t('channels.unknownProtocol')}</span> : <span className={css.modelBadge}>{entry.labelZh}</span>}
-                </label>
-              )
-            })}
-          </div>
-        ) : null}
 
         <div className={css.editorDivider} />
 

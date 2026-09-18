@@ -24,6 +24,7 @@ import { appendGallery, clearGallery, listGallery, readGalleryImage, removeGalle
 import { baseMime, canvasStore, CanvasConflictError, MAX_CANVAS_FILE_BYTES, mimeFromFileName, safeFileName, type CanvasFileInput, type CanvasImageInput, type CanvasStore } from './canvas-store.ts'
 import { buildFilePreview } from './file-preview.ts'
 import { listTemplates, readTemplateImage, refreshTemplates, sampleTemplates } from './templates-store.ts'
+import { isComfyUiPreset, listComfyUiWorkflows, probeComfyUiService } from './comfyui-workflows.ts'
 import { addTemplateFavorite, listTemplateFavorites, removeTemplateFavorite } from './template-favorites.ts'
 import { testStorage, type StorageSyncConfig } from './storage-sync.ts'
 import { checkForUpdate, CURRENT_VERSION, installUpdate } from './updater.ts'
@@ -638,8 +639,17 @@ export function makeRoutes(deps: ImageGenRoutesDeps): WebRoute[] {
     // -------------------------------------------- image model discovery
     // Accepts optional temporary per-channel credentials so the settings card
     // can probe the endpoint the user is *typing* without saving first:
-    //   { channelId?, apiUrl?, apiKey? } — the channel's stored values are the
-    //   fallback, and the body's apiUrl/apiKey override them for this call.
+    //   { channelId?, apiUrl?, apiKey?, forceKind? } — the channel's stored
+    //   values are the fallback, and the body's apiUrl/apiKey override them
+    //   for this call. `forceKind: 'comfyui' | 'openai'` lets pre-channel
+    //   probes (the "add ComfyUI service" picker) tell the route to dispatch
+    //   as ComfyUI even when the user has no channel saved yet.
+    //
+    // For ComfyUI channels the response is `{ kind: 'comfyui', probe }` —
+    // ComfyUI mainline does NOT expose a workflow-listing HTTP route, so the
+    // endpoint only confirms reachability via POST /prompt; the user types
+    // workflow names by hand. Other channels fall back to the OpenAI-style
+    // `/v1/models` enumeration.
     {
       kind: 'exact',
       path: IMAGE_MODEL_API.models,
@@ -654,10 +664,51 @@ export function makeRoutes(deps: ImageGenRoutesDeps): WebRoute[] {
           apiUrl: typeof body?.apiUrl === 'string' && body.apiUrl.trim() !== '' ? body.apiUrl.trim() : (stored?.apiUrl ?? ''),
           apiKey: typeof body?.apiKey === 'string' && body.apiKey.trim() !== '' ? body.apiKey.trim() : (stored?.apiKey ?? ''),
         }
+        const storedPreset = stored?.preset ?? ''
+        const forceKind = typeof body?.forceKind === 'string' && (body.forceKind === 'comfyui' || body.forceKind === 'openai')
+          ? body.forceKind
+          : null
+        // The picker is the only caller that wants a `probe` (a connectivity
+        // check before the user has committed to a preset). It signals this
+        // intent explicitly via `probeOnly: true`. Every other ComfyUI
+        // dispatch — the channel editor — wants the full workflow listing.
+        const probeOnly = body?.probeOnly === true
+        // Heuristic fallback: a channel created before the ComfyUI preset
+        // field landed has `preset === ''` even though the user clearly
+        // wants ComfyUI dispatch. When the URL looks like a ComfyUI
+        // service (typical local port, no `/v1`/`/api/v1` OpenAI-shaped
+        // suffix), treat it as ComfyUI so old settings keep dispatching
+        // correctly. The picker sets `forceKind: 'comfyui'` explicitly so
+        // the heuristic never overrides an explicit user choice.
+        const url = upstream.apiUrl.trim()
+        const looksLikeComfyUiUrl = url !== ''
+          && !/\/v\d(?:\/|$)/.test(url)
+          && /^https?:\/\//.test(url)
+        const treatAsComfyUi = isComfyUiPreset(storedPreset)
+          || forceKind === 'comfyui'
+          || (storedPreset === '' && forceKind !== 'openai' && looksLikeComfyUiUrl)
         try {
-          writeJson(res, 200, { ok: true, models: await listImageModels(upstream) })
+          if (treatAsComfyUi) {
+            const comfyPreset = storedPreset === '' ? 'comfyui-local' : storedPreset
+            // `probeOnly: true` (set by the picker) → return a connectivity
+            // probe. Otherwise return the folder-grouped workflow listing.
+            if (probeOnly) {
+              const probe = await probeComfyUiService(upstream, { preset: comfyPreset })
+              writeJson(res, 200, { ok: true, kind: 'comfyui', probe })
+              return
+            }
+            const workflows = await listComfyUiWorkflows(upstream, { preset: comfyPreset })
+            writeJson(res, 200, { ok: true, kind: 'comfyui', workflows })
+            return
+          }
+          const models = await listImageModels(upstream)
+          writeJson(res, 200, { ok: true, kind: 'openai', models })
         } catch (error) {
-          writeJson(res, 200, { ok: false, code: 'image-models-failed', message: messageOf(error) })
+          const message = error instanceof Error ? error.message : String(error)
+          const code = error instanceof Error && 'code' in error && typeof (error as { code?: unknown }).code === 'string'
+            ? (error as { code: string }).code
+            : 'image-models-failed'
+          writeJson(res, 200, { ok: false, code, message })
         }
       },
     },

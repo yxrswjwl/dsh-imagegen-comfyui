@@ -319,6 +319,7 @@ export const inject = ['webServer', 'systemPrompt', 'commands']
 export { makeRoutes } from './routes.ts'
 export { generateImage, ImageGenError } from './engine.ts'
 export { promptCharLimit } from './model-catalog.ts'
+export { isComfyUiPreset, listComfyUiWorkflows, probeComfyUiService, type ComfyUiProbeResult, type ComfyUiWorkflowEntry, type ComfyUiWorkflowFolder, type ComfyUiWorkflowList } from './comfyui-workflows.ts'
 export { analyzeLayers, normalizeLayerPlan, MAX_LAYER_IMAGE_BYTES } from './layer-analyzer.ts'
 export { ImageGenerationRuntime } from './generation-runtime.ts'
 export { registerAgentImageTools } from './agent-image-tools.ts'

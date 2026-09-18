@@ -88,6 +88,28 @@ export const IMAGE_PRESETS: PresetProvider[] = [
       { alias: 'grok-imagine-image', id: 'grok-imagine-image' },
     ],
   },
+  {
+    id: 'comfyui-local',
+    name: 'ComfyUI（本地服务）',
+    apiUrl: 'http://127.0.0.1:8188',
+    hint: '本机 ComfyUI HTTP 服务：默认地址 127.0.0.1:8188；通常无需密钥；模型别名以 comfyui: 开头，对应本地工作流文件名',
+    models: [
+      { alias: 'comfyui:z_image_turbo', id: 'comfyui:z_image_turbo' },
+      { alias: 'comfyui:flux_dev', id: 'comfyui:flux_dev' },
+      { alias: 'comfyui:sdxl_base', id: 'comfyui:sdxl_base' },
+    ],
+  },
+  {
+    id: 'comfyui-remote',
+    name: 'ComfyUI（远程服务）',
+    apiUrl: '',
+    hint: '远程 ComfyUI 服务（如局域网 / 内网代理）：填写完整的 HTTP 地址；如远程服务启用鉴权，在「API 密钥」字段填入 Bearer Token；模型别名以 comfyui: 开头，对应远端工作流文件名',
+    models: [
+      { alias: 'comfyui:z_image_turbo', id: 'comfyui:z_image_turbo' },
+      { alias: 'comfyui:flux_dev', id: 'comfyui:flux_dev' },
+      { alias: 'comfyui:sdxl_base', id: 'comfyui:sdxl_base' },
+    ],
+  },
 ]
 
 /** Look up one built-in provider by id. */

@@ -932,6 +932,98 @@
   cursor: default;
 }
 
+/* --- folder-grouped model rows (ComfyUI workflows) ----------------------------------- */
+
+.modelFolder {
+  list-style: none;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  border: 1px solid var(--dsw-alias-border-l2);
+  border-radius: 10px;
+  padding: 6px 8px;
+  background: var(--dsw-alias-bg-layer-3);
+}
+
+/* Root bucket: a transparent wrapper that renders its child rows in flow
+ * without a folder header. Kept on the same vertical rhythm as `.modelFolder`
+ * (8px gap) but without the box. */
+.modelRootBucket {
+  list-style: none;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin: 0;
+  padding: 0;
+}
+
+.modelFolderHeader {
+  appearance: none;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  border: 0;
+  padding: 4px 2px;
+  background: transparent;
+  color: var(--dsw-alias-label-secondary);
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+  font-weight: 600;
+}
+
+.modelFolderHeader:hover {
+  color: var(--dsw-alias-label-primary);
+}
+
+.modelFolderName {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.modelFolderCount {
+  flex: none;
+  border-radius: 999px;
+  padding: 0 7px;
+  font-size: 11px;
+  line-height: 17px;
+  background: var(--dsw-alias-bg-module-platform);
+  color: var(--dsw-alias-label-tertiary);
+}
+
+.modelFolderList {
+  list-style: none;
+  margin: 0;
+  padding: 0 0 0 4px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.modelRowInfo {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.modelRowName {
+  font-weight: 500;
+  color: var(--dsw-alias-label-primary);
+}
+
+.modelRowPath {
+  font-size: 11px;
+  color: var(--dsw-alias-label-tertiary);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .modelCandidate > .modelBadge {
   flex: none;
 }

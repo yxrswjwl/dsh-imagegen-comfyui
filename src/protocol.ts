@@ -30,6 +30,47 @@ export const IMAGE_MODEL_API = {
   models: '/api/dsh-imagegen/image-models',
 } as const
 
+/** One workflow entry as the browser consumes it (ComfyUI: folder-grouped listing). */
+export interface ComfyUiWorkflowEntry {
+  /** Stable id, also the ComfyUI workflow `path` (relative to the workflows root). */
+  id: string
+  /** Workflow file name (the last path segment). */
+  name: string
+  /** The folder name this workflow belongs to (`''` for top-level). */
+  folder: string
+  /** Full path as reported by ComfyUI, e.g. `seedvr2_videoupscaler/SeedVR2_HD_video_upscale`. */
+  path: string
+}
+
+/** One folder grouping in the ComfyUI workflow listing. */
+export interface ComfyUiWorkflowFolder {
+  /** Folder name as displayed; `''` for the un-grouped top-level bucket. */
+  name: string
+  /** Display order (matches the folder's alphabetic order in the listing). */
+  workflows: ComfyUiWorkflowEntry[]
+}
+
+/** Aggregated ComfyUI workflow listing ready for the UI. */
+export interface ComfyUiWorkflowList {
+  folders: ComfyUiWorkflowFolder[]
+  /** Total workflow count (sum of every folder). */
+  total: number
+}
+
+/** Connectivity probe result returned by the image-models route when the
+ *  caller forces a ComfyUI dispatch from the picker (no channel saved yet).
+ *  The picker only needs reachability confirmation; the channel editor
+ *  fetches the full workflow listing separately. */
+export interface ComfyUiProbeResult {
+  reachable: boolean
+  /** Stable code for the failure case (drives UI copy). */
+  code?: 'unreachable' | 'http-error' | 'invalid-response' | 'config-missing' | 'not-comfyui'
+  /** Human-readable detail. */
+  message: string
+  /** The HTTP status code, when the probe reached the server. */
+  httpStatus?: number
+}
+
 /** Host-served built-in provider catalog (channels the user can instantiate). */
 export const PRESETS_API = '/api/dsh-imagegen/presets' as const
 

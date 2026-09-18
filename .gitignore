@@ -9,6 +9,9 @@ lib/
 # npm local cache (used by npm-cli on this machine)
 .npm-cache/
 
+# pnpm local store
+.pnpm-store/
+
 # Temp files
 .tmp-*
 
