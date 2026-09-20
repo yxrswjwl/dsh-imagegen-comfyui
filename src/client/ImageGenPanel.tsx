@@ -22,6 +22,7 @@ import { InspirationGallery } from './InspirationGallery.tsx'
 import { CanvasWorkspace } from './CanvasWorkspace.tsx'
 import { useImageGenLanguageTick } from './use-language.ts'
 import type { EcommerceRefRole, GeneratedImage, GenerateMode, GenerateRequest, GenerationTask, GenerationTaskStatus, HistoryEntry, HistoryImageRef, ProductSetDraft, ProductSetSlot, UpdateInfo } from '../protocol.ts'
+import { isComfyUiPreset } from '../protocol.ts'
 import { AGENT_IMAGE_API } from '../protocol.ts'
 import type { ImageGenConfig, ImageGenScope } from './settings-scope.ts'
 import { imageModelOptions } from './settings-scope.ts'
@@ -488,7 +489,18 @@ export function ImageGenPanel(props: {
   const legacyKeySet = useSecretSet(scope, 'apiKey')
   const promptKeySet = useSecretSet(scope, 'promptApiKey')
   const channelKeySet = (config?.channels ?? []).some(channel => scope.getSecretSetSnapshot(`channelSecrets.${channel.id}`))
-  const apiKeySet = (config?.channels ?? []).length > 0 ? channelKeySet : legacyKeySet
+  // ComfyUI presets accept an empty API key (the local service runs
+  // unauthenticated). The default channel being a ComfyUI preset lets the
+  // panel skip the "please configure an API key" gate; non-default channels
+  // are still required to set their own keys because the runtime routes by
+  // `model` and may pick a different channel per request.
+  const defaultChannel = defaultChannelId !== undefined
+    ? (config?.channels ?? []).find(channel => channel.id === defaultChannelId)
+    : undefined
+  const defaultKeyOptional = defaultChannel !== undefined && isComfyUiPreset(defaultChannel.preset ?? '')
+  const apiKeySet = (config?.channels ?? []).length > 0
+    ? (defaultKeyOptional ? true : channelKeySet)
+    : legacyKeySet
   const connected = enabled && configured && apiKeySet
 
   const [tab, setTab] = useState<PanelTab>('text')
@@ -524,6 +536,7 @@ export function ImageGenPanel(props: {
   const [submitting, setSubmitting] = useState(false)
   const [enhancing, setEnhancing] = useState(false)
   const [configGuide, setConfigGuide] = useState<'generation' | 'enhancement' | 'disabled' | null>(null)
+  const [configGuideVariant, setConfigGuideVariant] = useState<'generic' | 'comfyui'>('generic')
   const [history, setHistory] = useState<HistoryEntry[]>([])
   const [viewingHistoryId, setViewingHistoryId] = useState<string | null>(null)
   const [gallery, setGallery] = useState<HistoryEntry[]>([])
@@ -812,6 +825,7 @@ export function ImageGenPanel(props: {
 
   const openSettingsGuide = (kind: 'generation' | 'enhancement' | 'disabled'): void => {
     setConfigGuide(kind)
+    setConfigGuideVariant(defaultChannel !== undefined && isComfyUiPreset(defaultChannel.preset ?? '') ? 'comfyui' : 'generic')
     const openPluginSettings = (): void => {
       const pluginButton = Array.from(document.querySelectorAll<HTMLButtonElement>('button')).find(button => /^(插件|Plugins)$/.test(button.textContent?.trim() ?? ''))
       pluginButton?.click()
@@ -930,6 +944,9 @@ export function ImageGenPanel(props: {
       return
     }
     if (!configured || !apiKeySet) {
+      // Diagnostic — surfaces in DevTools so we can tell which check
+      // tripped without reproducing on our own machines.
+      console.warn('[dsh-imagegen] generate gated', { enabled, configured, apiKeySet, defaultKeyOptional, defaultChannelId, apiUrl })
       openSettingsGuide('generation')
       return
     }
@@ -2449,6 +2466,7 @@ export function ImageGenPanel(props: {
               api={api}
               imageModels={imageModels}
               defaultChannelId={defaultChannelId}
+              channels={config?.channels ?? []}
               connected={connected}
               history={history}
               gallery={gallery}
@@ -2673,6 +2691,9 @@ export function ImageGenPanel(props: {
                     <span className={css.taskPrompt}>{task.request.prompt}</span>
                     {(task.status === 'queued' || task.status === 'running') ? <button type="button" onClick={() => { void api.taskCancel(task.id) }}>{tt('tasks.cancel')}</button> : null}
                     {task.status === 'failed' || task.status === 'cancelled' ? <button type="button" onClick={() => { void api.taskRetry(task.id) }}>{tt('tasks.retry')}</button> : null}
+                    {task.status === 'failed' && typeof task.error === 'string' && task.error !== ''
+                      ? <span className={css.taskError} title={task.error}>{task.error}</span>
+                      : null}
                   </div>
                 ))}
               </div>
@@ -2838,7 +2859,11 @@ export function ImageGenPanel(props: {
         <div className={css.configGuide} role="dialog" aria-modal="true" aria-label={tt(`config.${configGuide}Title` as never)}>
           <div className={css.configGuideBody}>
             <strong>{tt(`config.${configGuide}Title` as never)}</strong>
-            <span>{tt(`config.${configGuide}Hint` as never)}</span>
+            <span>{configGuide === 'generation' && configGuideVariant === 'comfyui'
+              ? tt('config.generationHintComfyUi')
+              : configGuide === 'generation'
+                ? `enabled=${String(enabled)} · configured=${String(configured)} · apiKeySet=${String(apiKeySet)} · defaultChannel=${defaultChannel?.name ?? '?'} · apiUrl="${apiUrl}"`
+                : tt(`config.${configGuide}Hint` as never)}</span>
             <button type="button" onClick={() => { setConfigGuide(null) }}>{tt('preview.close')}</button>
           </div>
         </div>

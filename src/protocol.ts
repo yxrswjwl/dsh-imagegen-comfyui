@@ -8,7 +8,7 @@
 export const IMAGEGEN_SETTINGS_NAMESPACE = 'dsh-imagegen'
 
 /** Published package version shared by the host updater and the client UI. */
-export const PLUGIN_VERSION = '1.5.12'
+export const PLUGIN_VERSION = '1.5.14'
 
 /** Same-origin route family (loopback-only, mirroring the dsh-ssh fence). */
 export const SETTINGS_API = {
@@ -153,6 +153,14 @@ export const CANVAS_API = {
   fileUpload: '/api/dsh-imagegen/canvas/file/upload',
   /** Structured content preview (text / table / office / archive) of one asset. */
   filePreview: '/api/dsh-imagegen/canvas/file/preview',
+  /** ComfyUI workflow inspector: returns the scanner output for a
+   *  (channel, model) pair so the canvas can render a workflow node
+   *  with the right connectors and advanced options. */
+  workflowInspect: '/api/dsh-imagegen/canvas/workflow/inspect',
+  /** Run a workflow node: collects connected text/image inputs, injects them
+   *  into the workflow JSON, submits to ComfyUI, and returns a task id the
+   *  client can poll for status / outputs. Round 4 entry point. */
+  runWorkflow: '/api/dsh-imagegen/canvas/workflow/run',
 } as const
 
 /** Same-origin route family for canvas skills (catalog + run control). */
@@ -340,7 +348,7 @@ export interface CanvasAssetRef {
   textPreview?: string
 }
 
-export type CanvasNodeType = 'image' | 'text' | 'file' | 'config'
+export type CanvasNodeType = 'image' | 'text' | 'file' | 'config' | 'workflow'
 
 /** Coarse bucket driving the file node's icon and preview branch. */
 export type CanvasFileKind = 'text' | 'pdf' | 'image' | 'office' | 'archive' | 'audio' | 'video' | 'other'
@@ -793,6 +801,71 @@ export interface CanvasNodeMetadata {
   fileKind?: CanvasFileKind
   /** Skill-produced nodes: which skill produced this and from what. */
   skill?: CanvasSkillProvenance
+  /** Workflow nodes: the ComfyUI workflow this node drives. The
+   *  `inspection` snapshot is taken at creation time and re-fetched
+   *  when `model` / `channelId` change; the canvas UI renders the
+   *  inspection as a read-only list of text/image ports plus an
+   *  advanced-options accordion (round 2 scope). Generation wiring
+   *  lives in round 3+. */
+  workflow?: CanvasWorkflowNodeMeta
+}
+
+/** Snapshot of one ComfyUI workflow embedded in a canvas workflow
+ *  node. The shape mirrors `WorkflowInspection` (the scanner output)
+ *  but keeps only the fields the canvas UI consumes; raw types like
+ *  `unrecognised` are summarised into a count so the metadata doesn't
+ *  balloon for workflows with hundreds of custom nodes. */
+export interface CanvasWorkflowNodeMeta {
+  /** Resolved channel id (the channel that owns the model alias). */
+  channelId: string
+  /** Model alias (the same string the user picks in the picker). */
+  model: string
+  /** Human-readable channel name, copied at creation for tooltips. */
+  channelName?: string
+  /** ComfyUI workflow path (after the `comfyui:` prefix is stripped). */
+  workflowPath: string
+  /** Workflow display name; matches the last segment of `workflowPath`. */
+  workflowName: string
+  /** Stable hash so the canvas can tell when an inspect must re-run. */
+  fingerprint: string
+  /** Text prompt slots the canvas renders as connectors (round 3). */
+  textSlots: Array<{
+    nodeId: string
+    inputName: string
+    classType: string
+    label: string
+  }>
+  /** Image-reference slots (round 3). */
+  imageSlots: Array<{
+    nodeId: string
+    inputName: string
+    classType: string
+    label: string
+  }>
+  /** Widget options shown in the advanced accordion. */
+  options: Array<{
+    nodeId: string
+    inputName: string
+    classType: string
+    label: string
+    type: string
+    /** Default value carried over from the inline `inputs[name]`
+     *  (round 4.2); `undefined` when the workflow hides it behind a
+     *  widget marker without an inline fallback. */
+    defaultValue?: unknown
+  }>
+  /** Latent image size if the workflow has one. */
+  size: { nodeId: string; width: number; height: number } | null
+  /** Count of unrecognised inputs (kept terse to avoid metadata bloat). */
+  unrecognisedCount: number
+  /** User-overridden values for the widget options (round 4 runner
+   *  reads these; round 2 leaves them empty). */
+  advancedOverrides: Record<string, unknown>
+  /** Inspect status: 'ok' once the host returned a usable inspection;
+   *  'ui-format' / 'error' for the two ways creation can fail. */
+  status: 'ok' | 'ui-format' | 'error'
+  /** Actionable message for the failing status. */
+  error?: string
 }
 
 export interface CanvasNode {
@@ -810,6 +883,12 @@ export interface CanvasConnection {
   id: string
   fromNodeId: string
   toNodeId: string
+  /** Optional handle id on the target node. Round 3 uses it to route a
+   *  workflow node's text/image input to a specific slot (e.g. the
+   *  positive prompt vs. a second reference image). For all other node
+   *  pairs this stays undefined and the connection still anchors on the
+   *  generic right/left edges. */
+  toHandle?: string
 }
 
 export interface CanvasDocument {
@@ -967,6 +1046,12 @@ export interface ModelMapping {
   alias: string
   /** Upstream model id sent to the gateway. */
   id: string
+  /** Free-form per-model host-only metadata. For ComfyUI channels the
+   *  workflow picker caches the full workflow JSON under `comfyuiJson` so
+   *  the engine does not have to re-fetch it on every generation (and so
+   *  deployments whose ComfyUI build does not expose `GET /userdata/{file}`
+   *  still work). Stripped on the wire for non-ComfyUI channels. */
+  metadata?: Record<string, string>
 }
 
 /**
@@ -985,6 +1070,12 @@ export interface ChannelConfig {
   apiUrl: string
   /** The channel's model catalog (alias → upstream id). */
   models: ModelMapping[]
+  /** ComfyUI installation directory (host-side only). When the upstream
+   *  service is a local ComfyUI that does not expose `GET /userdata/{file}`
+   *  (older builds, custom_node conflicts), the engine falls back to reading
+   *  workflows from `<installDir>/user/default/workflows/<path>`. Stripped
+   *  on the wire for non-ComfyUI channels. */
+  installDir?: string
 }
 
 /** One built-in provider as the settings card consumes it. */
@@ -1077,4 +1168,14 @@ export interface HistoryEntryInput extends EcommerceTaskMeta {
   /** Model aliases included in the comparison run. */
   comparisonModels?: string[]
   canvas?: CanvasTaskMeta
+}
+
+/** Whether a channel preset id belongs to the ComfyUI family (`comfyui-local`,
+ *  `comfyui-remote`, …). ComfyUI presets accept an empty API key because the
+ *  local service runs unauthenticated; the panel uses this helper to skip the
+ *  "please configure an API key" gate on ComfyUI channels. The same regex
+ *  lives in `comfyui-workflows.ts` for the server-side check; keeping a copy
+ *  here means the client bundle does not have to import server-only code. */
+export function isComfyUiPreset(preset: string): boolean {
+  return /^comfyui-/i.test(preset.trim())
 }

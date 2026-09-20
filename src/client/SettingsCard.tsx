@@ -1106,6 +1106,10 @@ function ChannelEditor(props: {
    *  `comfyui:<folder>/<name>`. Existing entries with the same alias are
    *  not duplicated. */
   const addComfyUiWorkflow = (entry: ComfyUiWorkflowEntry): void => {
+    // Both alias and id carry the `comfyui:` prefix: the engine routes by
+    // `wireModel` family detection, and a missing prefix on `id` was the
+    // root cause of "task submitted but engine routed through the OpenAI
+    // path" — the upstream id is what `request.upstream` ends up as.
     const id = `comfyui:${entry.path}`
     if (channel.models.some(model => model.alias === id)) return
     props.onSetModels([...channel.models, { alias: id, id }])
@@ -1226,6 +1230,22 @@ function ChannelEditor(props: {
           <label className={css.label} htmlFor="dsh-imagegen-channel-url">{t('channels.apiUrl')}</label>
           <input id="dsh-imagegen-channel-url" className={css.input} value={channel.apiUrl} placeholder="https://api.example.com/v1" disabled={!props.writable} onChange={event => { props.onPatch({ apiUrl: event.target.value }) }} />
         </div>
+        {comfyUi
+          ? (
+            <div className={css.editorField}>
+              <label className={css.label} htmlFor="dsh-imagegen-channel-install-dir">{t('channels.comfyuiInstallDir')}</label>
+              <input
+                id="dsh-imagegen-channel-install-dir"
+                className={css.input}
+                value={channel.installDir ?? ''}
+                placeholder={t('channels.comfyuiInstallDirPlaceholder')}
+                disabled={!props.writable}
+                onChange={event => { props.onPatch({ installDir: event.target.value }) }}
+              />
+              <p className={css.sectionHint}>{t('channels.comfyuiInstallDirHint')}</p>
+            </div>
+          )
+          : null}
         <div className={css.editorField}>
           <div className={css.head}>
             <label className={css.label} htmlFor="dsh-imagegen-channel-key">{t('channels.apiKey')}</label>

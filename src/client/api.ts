@@ -3,7 +3,7 @@
  * data access path the panel uses — plain fetch, same origin.
  */
 
-import { CANVAS_API, CANVAS_SKILL_API, CONVERSATION_IMAGE_API, DATA_FOLDER_API, GALLERY_API, GENERATE_API, HISTORY_API, PROMPT_ENHANCE_API, STORAGE_API, TASK_API, TEMPLATE_FAVORITES_API, TEMPLATES_API, UPDATE_API, type CanvasAssetRef, type CanvasDocument, type CanvasFilePreview, type CanvasLayerPlan, type CanvasSkillCatalog, type CanvasSkillConfigApplyRequest, type CanvasSkillConfigApplyResult, type CanvasSkillConfigSaveRequest, type CanvasSkillConfigSaveResult, type CanvasSkillInstallRequest, type CanvasSkillInstallResult, type CanvasSkillLibrary, type CanvasSkillRemoveResult, type CanvasSkillRunRequest, type CanvasSkillTask, type CanvasSummary, type GenerateRequest, type GenerateResult, type GenerationTask, type HistoryEntry, type HistoryEntryInput, type TemplateCase, type TemplateFavorite, type TemplateListResult, type TemplateRefreshResult, type TemplateSample, type UpdateInfo } from '../protocol.ts'
+import { CANVAS_API, CANVAS_SKILL_API, CONVERSATION_IMAGE_API, DATA_FOLDER_API, GALLERY_API, GENERATE_API, HISTORY_API, PROMPT_ENHANCE_API, STORAGE_API, TASK_API, TEMPLATE_FAVORITES_API, TEMPLATES_API, UPDATE_API, type CanvasAssetRef, type CanvasDocument, type CanvasFilePreview, type CanvasLayerPlan, type CanvasSkillCatalog, type CanvasSkillConfigApplyRequest, type CanvasSkillConfigApplyResult, type CanvasSkillConfigSaveRequest, type CanvasSkillConfigSaveResult, type CanvasSkillInstallRequest, type CanvasSkillInstallResult, type CanvasSkillLibrary, type CanvasSkillRemoveResult, type CanvasSkillRunRequest, type CanvasSkillTask, type CanvasSummary, type CanvasWorkflowNodeMeta, type GenerateRequest, type GenerateResult, type GenerationTask, type HistoryEntry, type HistoryEntryInput, type TemplateCase, type TemplateFavorite, type TemplateListResult, type TemplateRefreshResult, type TemplateSample, type UpdateInfo } from '../protocol.ts'
 import { activeImageGenLanguage } from './helpers.ts'
 
 /** Error carrying the route's JSON error message. */
@@ -17,6 +17,26 @@ export class ImageGenApiError extends Error {
     this.code = code
   }
 }
+
+/** Result envelope returned by `canvasWorkflowInspect`. Success carries
+ *  a `CanvasWorkflowNodeMeta` snapshot; failure carries a structured
+ *  `code`/`status` (the route never throws for the round-2 inspection
+ *  paths — every known failure mode has a stable code the UI can
+ *  branch on). */
+export type CanvasWorkflowInspectResult =
+  | { ok: true; inspection: CanvasWorkflowNodeMeta }
+  | {
+      ok: false
+      code: 'bad-request' | 'no-channels' | 'image-model-not-configured' | 'ui-format' | 'inspect-failed' | string
+      /** Stable status the canvas UI branches on (independent of `code`). */
+      status?: 'ui-format' | 'error'
+      message: string
+    }
+
+/** Result envelope returned by `canvasRunWorkflow`. Round 4.1. */
+export type CanvasWorkflowRunResult =
+  | { ok: true; images: import('./protocol.ts').GeneratedImage[]; canvasId: string; workflowNodeId: string }
+  | { ok: false; code: string; message: string }
 
 /** Parse the { ok, ... } envelope or throw an ImageGenApiError. */
 async function readEnvelope<T>(response: Response): Promise<T> {
@@ -356,6 +376,56 @@ export class ImageGenApi {
       body: JSON.stringify({ taskId, language: activeImageGenLanguage() }),
     })
     return (await readEnvelope<{ ok: true; cancelled: boolean }>(response)).cancelled
+  }
+
+  /** Resolve a (channel, model) pair into a ComfyUI workflow inspection
+   *  (text/image slots, advanced options, latent size). The host endpoint
+   *  returns either `{ ok: true, inspection }` or a structured failure
+   *  with `code` and `status` (round 2: `ui-format` when the workflow was
+   *  saved in ComfyUI's UI export format rather than API format). */
+  async canvasWorkflowInspect(channelId: string, model: string, workflowBody?: string, workflowName?: string): Promise<CanvasWorkflowInspectResult> {
+    const response = await fetch(CANVAS_API.workflowInspect, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ channelId, model, ...(workflowBody === undefined ? {} : { workflowBody }), ...(workflowName === undefined ? {} : { workflowName }) }),
+    })
+    // The inspect endpoint is allowed to return a structured failure
+    // (`{ ok: false, code, status, message }`) for round-2 cases like
+    // UI-format workflows — those are expected outcomes, not transport
+    // errors, so we bypass `readEnvelope`'s throw-on-ok-false behaviour
+    // and surface them directly. Transport-level failures (non-JSON,
+    // HTTP 5xx, etc.) still throw as before.
+    let body: unknown
+    try {
+      body = await response.json()
+    } catch {
+      throw new ImageGenApiError(`HTTP ${response.status}: invalid JSON response`)
+    }
+    if (body === null || typeof body !== 'object') {
+      throw new ImageGenApiError(`HTTP ${response.status}: malformed response`)
+    }
+    return body as CanvasWorkflowInspectResult
+  }
+
+  /** Run one workflow node: host collects connected text inputs, injects
+   *  them into the workflow, submits to ComfyUI, and returns generated
+   *  images as inline `data:` URLs. Round 4.1. */
+  async canvasRunWorkflow(canvasId: string, workflowNodeId: string): Promise<CanvasWorkflowRunResult> {
+    const response = await fetch(CANVAS_API.runWorkflow, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ canvasId, workflowNodeId }),
+    })
+    let body: unknown
+    try {
+      body = await response.json()
+    } catch {
+      throw new ImageGenApiError(`HTTP ${response.status}: invalid JSON response`)
+    }
+    if (body === null || typeof body !== 'object') {
+      throw new ImageGenApiError(`HTTP ${response.status}: malformed response`)
+    }
+    return body as CanvasWorkflowRunResult
   }
 
   /** Fetch one template source's list (bundled snapshot or refreshed copy). */

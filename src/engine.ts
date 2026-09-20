@@ -11,6 +11,8 @@
 import type { GeneratedImage, GenerateRequest, GenerateResult } from './protocol.ts'
 import { detectImageMime } from './image-format.ts'
 import { modelFamily, promptCharLimit } from './model-catalog.ts'
+import { fetchComfyUiWorkflow, injectPromptIntoWorkflow, type ApiWorkflow, type InjectionSummary } from './comfyui-workflow-loader.ts'
+import { waitForComfyUiOutputs } from './comfyui-history.ts'
 
 /** The upstream credentials the panel's settings card configures. */
 export interface UpstreamConfig {
@@ -18,6 +20,12 @@ export interface UpstreamConfig {
   apiUrl: string
   /** Bearer API key. */
   apiKey: string
+  /** ComfyUI install directory (host-side only). When the channel is a
+   *  ComfyUI preset and the service does not expose `GET /userdata/{file}`,
+   *  the engine falls back to reading workflows from
+   *  `<installDir>/user/default/workflows/<path>`. Undefined for non-ComfyUI
+   *  channels. */
+  installDir?: string
 }
 
 /** A generation failure with a user-presentable message. */
@@ -44,12 +52,17 @@ const MAX_EDIT_IMAGE_BYTES = 10 * 1024 * 1024
 /** Sizes dall-e-3 accepts; anything else falls back to its square default. */
 const DALLE3_SIZES = new Set(['1024x1024', '1792x1024', '1024x1792'])
 
-/** The wire model id for a request: `upstream` (host-filled alias mapping)
- *  wins, then the alias, then the family default. */
+/** The wire model id for a request: the alias (`request.model`) wins when it
+ *  carries a family-detection prefix the upstream id might not (ComfyUI
+ *  stores `comfyui:<workflow-path>` as the alias but historically the upstream
+ *  id was the bare path with no prefix). Otherwise `upstream` (host-filled
+ *  alias mapping) wins, then the alias again as the family default. */
 function wireModel(request: GenerateRequest): string {
+  const alias = request.model.trim()
+  if (alias.startsWith('comfyui:')) return alias
   const upstream = request.upstream?.trim()
   if (upstream !== undefined && upstream !== '') return upstream
-  const alias = request.model.trim()
+  if (alias !== '') return alias
   return alias === '' ? 'gpt-image-2' : alias
 }
 
@@ -957,9 +970,15 @@ async function generateMiniMaxImage(
 export async function generateImage(upstream: UpstreamConfig, request: GenerateRequest, options: { signal?: AbortSignal } = {}): Promise<GenerateResult> {
   const baseUrl = upstream.apiUrl.trim().replace(/\/+$/, '')
   if (baseUrl === '') throw new ImageGenError('api_url 未配置：请先在「设置 → 插件 → 可配置」中填写', 'config-missing')
-  if (upstream.apiKey.trim() === '') throw new ImageGenError('api_key 未配置：请先在「设置 → 插件 → 可配置」中填写', 'config-missing')
+  // ComfyUI's local service has no auth: an empty api_key is the normal
+  // configuration, not a misconfiguration. Other providers still require
+  // one, so the per-family check below enforces that on the OpenAI path.
+  if (modelFamily(wireModel(request)) !== 'comfyui' && upstream.apiKey.trim() === '') {
+    throw new ImageGenError('api_key 未配置：请先在「设置 → 插件 → 可配置」中填写', 'config-missing')
+  }
   if (isQwenImage(wireModel(request))) return generateQwenImage(baseUrl, upstream, request, options)
   if (isMiniMaxImage(wireModel(request))) return generateMiniMaxImage(baseUrl, upstream, request, options)
+  if (modelFamily(wireModel(request)) === 'comfyui') return generateComfyUiImage(baseUrl, upstream, request, options)
   if (request.mode === 'edit' && isZhipuImage(wireModel(request))) {
     throw new ImageGenError('智谱 GLM-Image 当前仅支持文生图，请切换到文生图模式或选择支持图生图的模型', 'edit-unsupported')
   }
@@ -969,6 +988,161 @@ export async function generateImage(upstream: UpstreamConfig, request: GenerateR
     Array.from({ length: count }, () => requestOneImage(baseUrl, upstream, request, params, options.signal)),
   )
   return { images: batches.flat() }
+}
+
+/**
+ * ComfyUI generation pipeline. The model alias is the workflow path
+ * (`comfyui:SD3/z_image_turbo.json` → file at
+ * `ComfyUI/user/default/workflows/SD3/z_image_turbo.json`). We fetch that
+ * file, inject the panel's prompt + a random seed into the right nodes,
+ * submit the result via `POST /prompt`, then poll `/history/{prompt_id}`
+ * and pull the output images via `/view`. The shape of the result matches
+ * the OpenAI pipeline so the rest of the host (history, canvas, etc.) does
+ * not have to know it routed through ComfyUI.
+ *
+ * Note: an `n > 1` request runs `n` parallel workflows with different
+ * seeds, matching how the OpenAI path satisfies its count.
+ */
+async function generateComfyUiImage(
+  baseUrl: string,
+  upstream: UpstreamConfig,
+  request: GenerateRequest,
+  options: { signal?: AbortSignal },
+): Promise<GenerateResult> {
+  const alias = request.model.trim()
+  // The model alias carries the relative workflow path after the `comfyui:`
+  // prefix; tolerate either `comfyui:foo.json` or `comfyui:/foo.json`. We
+  // intentionally use `request.model` (the alias) here rather than
+  // `wireModel(request)`: the alias is what the user picked and what carries
+  // the family prefix; the upstream id is what we would actually send to an
+  // OpenAI gateway, but ComfyUI's HTTP API doesn't take a model id at all.
+  const workflowPath = alias.startsWith('comfyui:') ? alias.slice('comfyui:'.length) : alias
+  if (workflowPath.trim() === '') throw new ImageGenError('ComfyUI 工作流路径为空', 'config-missing')
+  if (request.mode === 'edit') {
+    throw new ImageGenError('ComfyUI 图生图尚未实现，请先使用文生图工作流', 'edit-unsupported')
+  }
+  // Load once: every parallel sub-request would otherwise hammer
+  // `/userdata/workflows/...` four times. The same JSON is reused. When the
+  // channel is local and `installDir` is configured, the loader falls back
+  // to disk reads on HTTP 404 — see `comfyui-workflow-loader.ts`.
+  const workflowTemplate = await fetchComfyUiWorkflow(upstream, workflowPath, { signal: options.signal, installDir: upstream.installDir })
+  const count = clampCount(request.n)
+  const images = (await Promise.all(
+    Array.from({ length: count }, async () => runOneComfyUiWorkflow(baseUrl, upstream, workflowTemplate, request, options.signal)),
+  )).flat()
+  return { images }
+}
+
+/** Run a single workflow with a fresh random seed and read its outputs. */
+async function runOneComfyUiWorkflow(
+  baseUrl: string,
+  upstream: UpstreamConfig,
+  workflowTemplate: ApiWorkflow,
+  request: GenerateRequest,
+  signal?: AbortSignal,
+): Promise<GeneratedImage[]> {
+  // Deep-clone so the per-run injection does not leak seeds into siblings.
+  const workflow: ApiWorkflow = JSON.parse(JSON.stringify(workflowTemplate))
+  const summary: InjectionSummary = injectPromptIntoWorkflow(workflow, { positive: request.prompt })
+  if (summary.positiveNodeId === null) {
+    throw new ImageGenError('工作流里找不到 CLIPTextEncode 节点：请确认选的是 ComfyUI 文生图工作流（不是 API/参考图工作流）', 'comfyui-no-prompt-node')
+  }
+  const promptId = await submitComfyUiPrompt(baseUrl, upstream, workflow, signal)
+  return await waitForComfyUiOutputs(baseUrl, upstream.apiKey, promptId, signal)
+}
+
+/** POST the (mutated) workflow JSON to ComfyUI and return the assigned id. */
+async function submitComfyUiPrompt(
+  baseUrl: string,
+  upstream: UpstreamConfig,
+  workflow: ApiWorkflow,
+  signal?: AbortSignal,
+): Promise<string> {
+  // `client_id` is optional: ComfyUI assigns one if you don't, but some
+  // custom-node WS subscribers want to recognise this plugin's traffic.
+  // We use a stable id namespace ("dsh-imagegen") so the user can filter
+  // their own jobs in the ComfyUI queue UI.
+  const body = { prompt: workflow, client_id: 'dsh-imagegen' }
+  let response: Response
+  try {
+    response = await fetch(`${baseUrl}/prompt`, {
+      method: 'POST',
+      headers: {
+        'content-type': 'application/json',
+        ...upstream.apiKey.trim() !== '' ? { authorization: `Bearer ${upstream.apiKey.trim()}` } : {},
+      },
+      body: JSON.stringify(body),
+      signal,
+    })
+  } catch (error) {
+    throw new ImageGenError(`无法提交 ComfyUI 工作流：${error instanceof Error ? error.message : String(error)}`, 'comfyui-unreachable')
+  }
+  let payload: unknown
+  try {
+    payload = await response.json()
+  } catch {
+    throw new ImageGenError(`ComfyUI /prompt 返了非 JSON（HTTP ${response.status}）`, 'comfyui-invalid')
+  }
+  if (!response.ok) {
+    // `node_errors` from ComfyUI is a `{ "<node_id>": { "class_type": ..., "errors": [...] } }`
+    // map. Surfacing a representative error helps the user debug a broken
+    // workflow without diving into ComfyUI logs.
+    const message = extractComfyUiError(payload) ?? `ComfyUI /prompt 拒绝请求（HTTP ${response.status}）`
+    console.log('[engine] ComfyUI /prompt rejected:', JSON.stringify(payload).slice(0, 1500))
+    throw new ImageGenError(message, 'comfyui-rejected')
+  }
+  if (payload === null || typeof payload !== 'object' || Array.isArray(payload)) {
+    throw new ImageGenError('ComfyUI /prompt 返了意外格式', 'comfyui-invalid')
+  }
+  const record = payload as Record<string, unknown>
+  const id = record['prompt_id']
+  if (typeof id !== 'string' || id.trim() === '') {
+    throw new ImageGenError('ComfyUI /prompt 响应缺少 prompt_id', 'comfyui-invalid')
+  }
+  return id
+}
+
+/** Pull a representative error string from ComfyUI's error payload. */
+function extractComfyUiError(payload: unknown): string | undefined {
+  if (payload === null || typeof payload !== 'object' || Array.isArray(payload)) return undefined
+  const record = payload as Record<string, unknown>
+  const details: string[] = []
+  const nodeErrors = record['node_errors']
+  if (nodeErrors !== null && typeof nodeErrors === 'object' && !Array.isArray(nodeErrors)) {
+    for (const id of Object.keys(nodeErrors)) {
+      const entry = (nodeErrors as Record<string, unknown>)[id]
+      if (entry === null || typeof entry !== 'object' || Array.isArray(entry)) continue
+      const classType = (entry as Record<string, unknown>)['class_type']
+      const errors = (entry as Record<string, unknown>)['errors']
+      const parts: string[] = []
+      if (typeof classType === 'string' && classType !== '') parts.push(`class=${classType}`)
+      if (Array.isArray(errors)) {
+        for (const item of errors) {
+          if (item !== null && typeof item === 'object') {
+            const message = (item as Record<string, unknown>)['message']
+            if (typeof message === 'string' && message !== '') parts.push(message)
+          }
+        }
+      }
+      if (parts.length > 0) details.push(`[${id}] ${parts.join(': ')}`)
+    }
+  }
+  const error = record['error']
+  if (typeof error === 'string' && error.trim() !== '') {
+    return details.length > 0 ? `${error} — ${details.join('; ')}` : error
+  }
+  if (error !== null && typeof error === 'object') {
+    const errRecord = error as Record<string, unknown>
+    const type = typeof errRecord['type'] === 'string' ? errRecord['type'] : ''
+    const message = typeof errRecord['message'] === 'string' ? errRecord['message'] : ''
+    if (type !== '' || message !== '') {
+      const head = type !== '' ? type : (message !== '' ? 'error' : 'ComfyUI error')
+      const tail = [message, details.length > 0 ? details.join('; ') : ''].filter(s => s !== '').join(' — ')
+      return tail === '' ? head : `${head}: ${tail}`
+    }
+  }
+  if (details.length > 0) return `ComfyUI 节点错误: ${details.join('; ')}`
+  return undefined
 }
 
 /** Human-readable failure message from an upstream error payload. */

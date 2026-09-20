@@ -10,7 +10,7 @@ import { createPortal } from 'react-dom'
 import {
   Bold, BookOpen, ChevronDown, Copy, Download, Eraser, FileText as FileTextIcon, FolderX, Hand, Image as ImageIcon,
   Layers, Map as MapIcon, Maximize, Maximize2, MousePointer2, Palette, Pencil, Plus, Redo2, Scissors, SendHorizonal, Sparkles,
-  SquareDashedMousePointer, Trash2, Type, Undo2, Upload, Wand2, Wallpaper, X,
+  SquareDashedMousePointer, Trash2, Type, Undo2, Upload, Wand2, Wallpaper, Workflow, X,
 } from 'lucide-react'
 import type { CanvasAnnotation, CanvasAssetRef, CanvasConnection, CanvasDocument, CanvasFileKind, CanvasLayerInfo, CanvasLayerPlanItem, CanvasNode, CanvasRect, CanvasSkillConfigApplyResult, CanvasSkillConfigField, CanvasSkillConfigSaveResult, CanvasSkillConfigStep, CanvasSkillConfigView, CanvasSkillDescriptor, CanvasSkillLibrary, CanvasSkillOutput, CanvasSkillRunRequest, CanvasSkillTask, CanvasSketchStroke, GenerateRequest, GenerationTask, HistoryEntry } from '../protocol.ts'
 import type { ImageGenApi } from './api.ts'
@@ -33,6 +33,7 @@ const TEXT_NODE_SIZE = { width: 280, height: 150 }
  *  column that matches hand-made ones. */
 const FILE_NODE_SIZE = { width: 300, height: 170 }
 const CONFIG_NODE_SIZE = { width: 320, height: 190 }
+const WORKFLOW_NODE_SIZE = { width: 340, height: 240 }
 const LEGACY_CONFIG_NODE_SIZE = { width: 240, height: 96 }
 /** Sketch boards keep a fixed frame (header + square-ish board + two tool rows)
  *  so the normalized strokes always map onto the same rect. */
@@ -66,6 +67,11 @@ interface CanvasWorkspaceProps {
   api: ImageGenApi
   imageModels: string[]
   defaultChannelId?: string
+  /** Resolved channel list (the workflow inspector needs `channelId` +
+   *  `model` pairs, which only the channel view knows). Optional so the
+   *  legacy flat-config path still works; when absent, the workflow
+   *  picker is hidden. */
+  channels?: ReadonlyArray<{ id: string; name: string; models: ReadonlyArray<{ alias: string; id: string }> }>
   connected: boolean
   history: HistoryEntry[]
   gallery: HistoryEntry[]
@@ -107,6 +113,10 @@ interface ConnectState {
   handleType: 'source' | 'target'
   mouse: Point
   targetId: string | null
+  /** Target handle id on the destination node when hovering a workflow
+   *  input port. Lets the connection snap to a specific text/image slot
+   *  instead of the generic left anchor. */
+  targetHandle?: string
   /** False for a plain click on the handle (opens the add-node menu), true
    *  once the pointer travels far enough that this is a drag-to-connect. */
   moved: boolean
@@ -240,7 +250,25 @@ function bezierPath(from: Point, to: Point): string {
   return `M ${from.x} ${from.y} C ${from.x + bend} ${from.y}, ${to.x - bend} ${to.y}, ${to.x} ${to.y}`
 }
 
-function nodeAnchor(node: CanvasNode, side: 'left' | 'right'): Point {
+function nodeAnchor(node: CanvasNode, side: 'left' | 'right', handle?: string): Point {
+  if (side === 'left' && handle !== undefined && node.type === 'workflow') {
+    const workflow = nodeMetadata(node).workflow
+    if (workflow !== undefined) {
+      const slots = [...workflow.textSlots, ...workflow.imageSlots]
+      const index = slots.findIndex(slot => `${slot.nodeId}:${slot.inputName}` === handle)
+      if (index >= 0) {
+        // Mirror the CSS layout of `.workflowInputPorts`: the stack is
+        // vertically centred on the node with a 36 px stride per port
+        // (32 px tall pill + 4 px gap). Port centres sit at
+        // row top + 16 px so the bezier endpoint lands inside the pill.
+        const stride = 36
+        const stackHeight = slots.length * stride - 4
+        const stackTop = node.y + node.height / 2 - stackHeight / 2
+        const portTop = stackTop + index * stride
+        return { x: node.x, y: portTop + 16 }
+      }
+    }
+  }
   return { x: side === 'right' ? node.x + node.width : node.x, y: node.y + node.height / 2 }
 }
 
@@ -440,7 +468,7 @@ function rasterizeSketch(strokes: CanvasSketchStroke[], boardWidth: number, boar
   return { dataUrl: canvas.toDataURL('image/png'), width: canvas.width, height: canvas.height }
 }
 
-type ToolbarIconName = 'new' | 'select' | 'pan' | 'image' | 'text' | 'file' | 'sketch' | 'eraser' | 'trash' | 'undo' | 'redo' | 'fit' | 'minimap' | 'background' | 'template' | 'download' | 'duplicate' | 'sparkle' | 'send' | 'close' | 'deleteProject' | 'annotate' | 'removeBg' | 'layers' | 'bold' | 'color' | 'skill' | 'upload' | 'expand'
+type ToolbarIconName = 'new' | 'select' | 'pan' | 'image' | 'text' | 'file' | 'sketch' | 'eraser' | 'trash' | 'undo' | 'redo' | 'fit' | 'minimap' | 'background' | 'template' | 'download' | 'duplicate' | 'sparkle' | 'send' | 'close' | 'deleteProject' | 'annotate' | 'removeBg' | 'layers' | 'bold' | 'color' | 'skill' | 'upload' | 'expand' | 'workflow'
 
 /** Lucide icons (stroke matches the DSH line style); one shared component so
  *  every dock/toolbar icon comes from the same well-drawn set. */
@@ -476,6 +504,7 @@ function ToolbarIcon({ name, size = 16 }: { name: ToolbarIconName; size?: number
     case 'skill': return <Wand2 {...common} />
     case 'upload': return <Upload {...common} />
     case 'expand': return <Maximize2 {...common} />
+    case 'workflow': return <Workflow {...common} />
   }
 }
 
@@ -1172,7 +1201,7 @@ function ComposerSelect(props: {
 }
 
 export function CanvasWorkspace(props: CanvasWorkspaceProps): React.JSX.Element {
-  const { api, imageModels, defaultChannelId, connected, history, gallery, tasks, importRequest, onImportRequestHandled, onOpenSettings } = props
+  const { api, imageModels, defaultChannelId, channels, connected, history, gallery, tasks, importRequest, onImportRequestHandled, onOpenSettings } = props
   const [projects, setProjects] = useState<ProjectSummary[]>([])
   const [document, setDocument] = useState<CanvasDocument | null>(null)
   const [selectedIds, setSelectedIds] = useState<Set<string>>(() => new Set())
@@ -1186,6 +1215,9 @@ export function CanvasWorkspace(props: CanvasWorkspaceProps): React.JSX.Element 
   const [contextMenu, setContextMenu] = useState<ContextMenuState | null>(null)
   const [createMenu, setCreateMenu] = useState<{ screen: Point; world: Point } | null>(null)
   const [nodeAddMenu, setNodeAddMenu] = useState<{ nodeId: string; nodeType: CanvasNode['type']; screen: Point } | null>(null)
+  /** Two-step workflow picker: the create-menu lands here first; the user
+   *  picks (channel, model), then we close it and call createWorkflowNode. */
+  const [workflowPicker, setWorkflowPicker] = useState<{ screen: Point; world: Point; channelId?: string } | null>(null)
   const [minimapOpen, setMinimapOpen] = useState(true)
   const [pickerOpen, setPickerOpen] = useState(false)
   const [backgroundMenu, setBackgroundMenu] = useState<Point | null>(null)
@@ -1325,6 +1357,10 @@ export function CanvasWorkspace(props: CanvasWorkspaceProps): React.JSX.Element 
     }
   }, [])
   const imageFileRef = useRef<HTMLInputElement>(null)
+  /** Hidden file picker for "import workflow JSON" — uploads a ComfyUI
+   *  API-format JSON straight into the inspector (round 3.5) without
+   *  needing Save (API Format) inside the ComfyUI web UI. */
+  const workflowImportRef = useRef<HTMLInputElement>(null)
   const [renamingTitle, setRenamingTitle] = useState(false)
   const [confirmDeleteProject, setConfirmDeleteProject] = useState(false)
   const [saveState, setSaveState] = useState<'loading' | 'saved' | 'saving' | 'error'>('loading')
@@ -1499,6 +1535,17 @@ export function CanvasWorkspace(props: CanvasWorkspaceProps): React.JSX.Element 
     }
   }, [canvasCenter])
 
+  /** A workflow node carries a ComfyUI workflow reference plus an inspection
+   *  snapshot the host returns. The host endpoint resolves the channel +
+   *  model pair, reads the workflow file, runs the inspector, and feeds
+   *  back text/image slots + advanced options. We create the node with a
+   *  "pending" metadata so the user sees something immediately, then
+   *  patch in the result once the host responds. `ui-format` failures
+   *  are surfaced via the metadata's `error` field — never as a thrown
+   *  exception — so the canvas stays consistent with the round-1 error
+   *  contract. */
+  // (definition continues below; patchNode is hoisted from below)
+
   /** Sketch boards are image nodes carrying live stroke data; the rasterized
    *  PNG lands in `metadata.asset` (see SketchBoard) so they join generation
    *  as ordinary reference images. */
@@ -1543,6 +1590,165 @@ export function CanvasWorkspace(props: CanvasWorkspaceProps): React.JSX.Element 
       ? { ...node, ...('title' in patch ? { title: patch.title ?? node.title } : {}), ...('x' in patch || 'y' in patch || 'width' in patch || 'height' in patch ? { x: patch.x ?? node.x, y: patch.y ?? node.y, width: patch.width ?? node.width, height: patch.height ?? node.height } : {}), metadata: { ...nodeMetadata(node), ...patch } }
       : node))
   }, [updateNodes])
+
+  /** A workflow node carries a ComfyUI workflow reference plus an
+   *  inspection snapshot the host returns. The host endpoint resolves
+   *  the channel + model pair, reads the workflow file, runs the
+   *  inspector, and feeds back text/image slots + advanced options.
+   *  We create the node with a "pending" metadata so the user sees
+   *  something immediately, then patch in the result once the host
+   *  responds. `ui-format` failures are surfaced via the metadata's
+   *  `error` field — never as a thrown exception — so the canvas stays
+   *  consistent with the round-1 error contract. */
+  const createWorkflowNode = useCallback(async (position?: Point, channelId?: string, model?: string): Promise<CanvasNode | null> => {
+    if (channels === undefined || channels.length === 0 || channelId === undefined || model === undefined) return null
+    const channel = channels.find(candidate => candidate.id === channelId)
+    if (channel === undefined) return null
+    const center = position ?? canvasCenter()
+    const workflowPath = model.startsWith('comfyui:') ? model.slice('comfyui:'.length) : model
+    const workflowName = workflowPath.split('/').pop() ?? workflowPath
+    const node: CanvasNode = {
+      id: newId('node'), type: 'workflow', title: workflowName,
+      x: Math.round(center.x - WORKFLOW_NODE_SIZE.width / 2), y: Math.round(center.y - WORKFLOW_NODE_SIZE.height / 2),
+      width: WORKFLOW_NODE_SIZE.width, height: WORKFLOW_NODE_SIZE.height,
+      metadata: {
+        status: 'idle',
+        workflow: {
+          status: 'error',
+          error: tt('canvas.workflowInspectorPending'),
+          fingerprint: 'pending',
+          channelId: channel.id,
+          channelName: channel.name,
+          model,
+          workflowPath,
+          workflowName,
+          textSlots: [],
+          imageSlots: [],
+          options: [],
+          size: null,
+          unrecognisedCount: 0,
+          advancedOverrides: {},
+        },
+      },
+    }
+    placeNewNode(node)
+    const result = await api.canvasWorkflowInspect(channel.id, model)
+    if (result.ok) {
+      patchNode(node.id, {
+        workflow: { ...result.inspection, error: undefined },
+        status: 'idle',
+      })
+    } else {
+      patchNode(node.id, {
+        workflow: {
+          ...(node.metadata?.workflow ?? { fingerprint: 'failed', channelId: channel.id, model, workflowPath, workflowName, textSlots: [], imageSlots: [], options: [], size: null, unrecognisedCount: 0, advancedOverrides: {} }),
+          status: result.status ?? 'error',
+          error: result.message,
+        },
+      })
+    }
+    return node
+  }, [api, channels, patchNode, placeNewNode])
+
+  /** Create a workflow node from a user-uploaded API-format JSON file.
+   *  Round 3.5: the user can't easily reach the ComfyUI "Save (API
+   *  Format)" affordance (it requires login on some installations), so
+   *  we let them drag any local .json that already matches the API
+   *  format straight into the inspector. The host returns the same
+   *  CanvasWorkflowNodeMeta snapshot, including textSlots and imageSlots that
+   *  drive the round-3 input connectors. */
+  const importWorkflowJson = useCallback(async (file: File): Promise<CanvasNode | null> => {
+    if (channels === undefined || channels.length === 0) return null
+    const channel = channels.find(candidate => candidate.models.length > 0) ?? channels[0]
+    if (channel === undefined) return null
+    const model = channel.models[0]?.alias
+    if (model === undefined) return null
+    const text = await file.text()
+    const center = canvasCenter()
+    const node: CanvasNode = {
+      id: newId('node'), type: 'workflow', title: file.name.replace(/\.json$/i, ''),
+      x: Math.round(center.x - WORKFLOW_NODE_SIZE.width / 2), y: Math.round(center.y - WORKFLOW_NODE_SIZE.height / 2),
+      width: WORKFLOW_NODE_SIZE.width, height: WORKFLOW_NODE_SIZE.height,
+      metadata: {
+        status: 'idle',
+        workflow: {
+          status: 'error',
+          error: tt('canvas.workflowInspectorPending'),
+          fingerprint: 'pending',
+          channelId: channel.id,
+          channelName: channel.name,
+          model,
+          workflowPath: '(imported)',
+          workflowName: file.name,
+          textSlots: [],
+          imageSlots: [],
+          options: [],
+          size: null,
+          unrecognisedCount: 0,
+          advancedOverrides: {},
+        },
+      },
+    }
+    placeNewNode(node)
+    const result = await api.canvasWorkflowInspect(channel.id, model, text, file.name)
+    if (result.ok) {
+      patchNode(node.id, {
+        workflow: { ...result.inspection, error: undefined },
+        status: 'idle',
+      })
+    } else {
+      patchNode(node.id, {
+        workflow: {
+          ...(node.metadata?.workflow ?? { fingerprint: 'failed', channelId: channel.id, model, workflowPath: '(imported)', workflowName: file.name, textSlots: [], imageSlots: [], options: [], size: null, unrecognisedCount: 0, advancedOverrides: {} }),
+          status: result.status ?? 'error',
+          error: result.message,
+        },
+      })
+    }
+    return node
+  }, [api, channels, patchNode, placeNewNode])
+
+  /** Run one workflow node via the host's run endpoint. The host collects
+   *  text inputs from connections, builds a GenerateRequest, runs the
+   *  engine synchronously, and returns generated images as base64. We
+   *  upload each image to the canvas asset store and create a fresh
+   *  image node beside the workflow for the user to inspect. */
+  const runWorkflow = useCallback(async (node: CanvasNode): Promise<void> => {
+    const current = documentRef.current
+    if (current === null) return
+    const runLabel = tt('canvas.workflowRunButton')
+    setBusyNodes(previous => ({ ...previous, [node.id]: runLabel }))
+    try {
+      const result = await api.canvasRunWorkflow(current.id, node.id)
+      if (!result.ok) {
+        setError(result.message)
+        return
+      }
+      if (result.images.length === 0) return
+      // Materialise each generated image as an asset and place an image
+      // node to the right of the workflow node, snapped vertically.
+      const baseX = node.x + node.width + 90
+      const baseY = node.y
+      for (let index = 0; index < result.images.length; index += 1) {
+        const image = result.images[index]!
+        const dataUrl = `data:${image.mime};base64,${image.b64}`
+        const dimensions = await readImageSize(dataUrl)
+        const asset = await api.canvasUpload(dataUrl, dimensions.width, dimensions.height, { origin: 'history' })
+        const imageNode = createImageNode(asset, { x: baseX + index * (IMAGE_NODE_SIZE.width + 60), y: baseY + index * 40 })
+        imageNode.title = `${node.title} #${index + 1}`
+        mutate(previous => ({ ...previous, nodes: [...previous.nodes, imageNode], connections: [...previous.connections, { id: newId('edge'), fromNodeId: node.id, toNodeId: imageNode.id }] }))
+      }
+      setNotice(tt('canvas.workflowRunComplete', { count: result.images.length }))
+    } catch (caught) {
+      setError(caught instanceof Error ? caught.message : String(caught))
+    } finally {
+      setBusyNodes(previous => {
+        const next = { ...previous }
+        delete next[node.id]
+        return next
+      })
+    }
+  }, [api, mutate])
 
   /** Sketch board write-backs. Stroke edits bypass history (the board has its
    *  own stroke-level undo); asset sync happens inside SketchBoard. */
@@ -1645,12 +1851,37 @@ export function CanvasWorkspace(props: CanvasWorkspaceProps): React.JSX.Element 
     setSelectedIds(new Set(clones.map(node => node.id)))
   }, [canvasCenter, mutate])
 
-  const connectNodes = useCallback((fromNodeId: string, toNodeId: string): void => {
+  const connectNodes = useCallback((fromNodeId: string, toNodeId: string, toHandle?: string): void => {
     if (fromNodeId === toNodeId) return
     const current = documentRef.current
     if (current === null) return
     if (current.connections.some(connection => connection.fromNodeId === fromNodeId && connection.toNodeId === toNodeId)) return
-    mutate(previous => ({ ...previous, connections: [...previous.connections, { id: newId('edge'), fromNodeId, toNodeId }] }))
+    // Workflow nodes expose typed input ports (text vs. image) — the
+    // port kind comes from the inspector's `classType`. Reject the
+    // connection when the source node type doesn't match so the user
+    // gets a clear error instead of a silent connection that the
+    // engine can't honour at run-time.
+    const fromNode = current.nodes.find(node => node.id === fromNodeId)
+    const toNode = current.nodes.find(node => node.id === toNodeId)
+    if (fromNode !== undefined && toNode !== undefined && toHandle !== undefined && toNode.type === 'workflow') {
+      const workflow = nodeMetadata(toNode).workflow
+      if (workflow !== undefined) {
+        const slot = [...workflow.textSlots, ...workflow.imageSlots].find(item => `${item.nodeId}:${item.inputName}` === toHandle)
+        if (slot !== undefined) {
+          const slotKind: 'text' | 'image' = (slot.classType === 'CLIPTextEncode' || slot.classType === 'CLIPTextEncodeSD3') ? 'text' : 'image'
+          const fromKind: 'text' | 'image' | 'other' =
+            fromNode.type === 'text' ? 'text' :
+            fromNode.type === 'image' ? 'image' :
+            fromNode.type === 'file' ? 'image' :
+            'other'
+          if (fromKind !== 'other' && fromKind !== slotKind) {
+            setError(tt('canvas.workflowPortTypeMismatch', { port: slot.label, expected: slotKind === 'text' ? tt('canvas.workflowPortKindText') : tt('canvas.workflowPortKindImage') }))
+            return
+          }
+        }
+      }
+    }
+    mutate(previous => ({ ...previous, connections: [...previous.connections, { id: newId('edge'), fromNodeId, toNodeId, ...(toHandle === undefined ? {} : { toHandle }) }] }))
   }, [mutate])
 
   /** Dify-style quick add: create a node to the right of `sourceId`, vertically
@@ -1921,6 +2152,18 @@ export function CanvasWorkspace(props: CanvasWorkspaceProps): React.JSX.Element 
     setSkillMenu({ screen: anchor, nodeId: node.id })
     void loadSkillCatalog()
   }, [loadSkillCatalog])
+
+  /** First half of the workflow picker: show a channel menu anchored at the
+   *  click point. After the user picks a channel we transition to the model
+   *  picker (same anchor). */
+  const openWorkflowPicker = useCallback((world?: Point, screen?: Point): void => {
+    setContextMenu(null); setCreateMenu(null); setNodeAddMenu(null)
+    // Default anchor mirrors the dock button anchor so a fallback (e.g.
+    // the createMenu entry point) also lands at the bottom-centre of the
+    // viewport. The CSS `transform: translate(-50%, calc(-100% - 8px))`
+    // takes care of the gap above the anchor.
+    setWorkflowPicker({ screen: screen ?? { x: window.innerWidth / 2, y: window.innerHeight - 14 - 42 }, world: world ?? { x: 0, y: 0 } })
+  }, [])
 
   /** Queue one skill run through the host, grow a run card out of the source
    *  node (connected with an animated edge), and track its task. */
@@ -3175,15 +3418,37 @@ export function CanvasWorkspace(props: CanvasWorkspaceProps): React.JSX.Element 
         }
         const nodes = documentRef.current?.nodes ?? []
         let targetId: string | null = null
+        let targetHandle: string | undefined
+        // Workflow ports sit 30 px left of the node box, so we extend the
+        // hit area when searching for a workflow target.
+        const pointerFit = (node: CanvasNode): boolean => {
+          if (world.y < node.y || world.y > node.y + node.height) return false
+          if (node.type === 'workflow') {
+            // Extend 30 px to the left of the box so a cursor sitting on
+            // a port counts as hovering the node.
+            return world.x >= node.x - 30 && world.x <= node.x + node.width
+          }
+          return world.x >= node.x && world.x <= node.x + node.width
+        }
         for (let index = nodes.length - 1; index >= 0; index -= 1) {
           const node = nodes[index]!
           if (node.id === connect.nodeId) continue
-          if (world.x >= node.x && world.x <= node.x + node.width && world.y >= node.y && world.y <= node.y + node.height) {
+          if (pointerFit(node)) {
             targetId = node.id
+            // Workflow nodes expose named input ports (one per text/image
+            // slot the inspector returned). When the pointer hovers one
+            // we remember its id so the connection persists `toHandle`
+            // and the engine can route the source value to the right slot.
+            if (node.type === 'workflow') {
+              const element = document.elementFromPoint(event.clientX, event.clientY)
+              const port = element?.closest('[data-handle-id]')
+              const handleId = port?.getAttribute('data-handle-id')
+              if (handleId !== null && handleId !== undefined && handleId !== '') targetHandle = handleId
+            }
             break
           }
         }
-        const next = { ...connect, mouse: world, targetId }
+        const next: ConnectState = { ...connect, mouse: world, targetId, ...(targetHandle === undefined ? {} : { targetHandle }) }
         connectRef.current = next
         setConnecting(next)
         return
@@ -3227,8 +3492,8 @@ export function CanvasWorkspace(props: CanvasWorkspaceProps): React.JSX.Element 
         connectRef.current = null
         setConnecting(null)
         if (connect.targetId !== null) {
-          if (connect.handleType === 'source') connectNodes(connect.nodeId, connect.targetId)
-          else connectNodes(connect.targetId, connect.nodeId)
+          if (connect.handleType === 'source') connectNodes(connect.nodeId, connect.targetId, connect.targetHandle)
+          else connectNodes(connect.targetId, connect.nodeId, connect.targetHandle)
         }
         return
       }
@@ -3483,6 +3748,109 @@ export function CanvasWorkspace(props: CanvasWorkspaceProps): React.JSX.Element 
 
   // ------------------------------------------------------------- render
 
+  /** Body of a workflow node. Round 2 only renders the inspection result;
+   *  round 3 will add port connectors (the `textSlots` and `imageSlots`
+   *  arrays the scanner returned), and round 4 the advanced-options
+   *  accordion wired to the engine runner. */
+  const renderWorkflowBody = (node: CanvasNode): React.JSX.Element => {
+    const workflow = nodeMetadata(node).workflow
+    if (workflow === undefined) {
+      return <div className={css.workflowError}>{tt('canvas.workflowInspectorError')}</div>
+    }
+    // The pending state is the *placeholder* createWorkflowNode seeds
+    // before the host responds: error is set to the pending message
+    // (because the metadata status union has no 'pending' value), but
+    // every other field is empty. After the host replies, status flips
+    // to 'ok' / 'ui-format' / 'error' and error holds the real reason —
+    // so the spinner only shows when nothing else has been written yet.
+    const hasAnySignal = workflow.textSlots.length > 0
+      || workflow.imageSlots.length > 0
+      || workflow.options.length > 0
+      || workflow.size !== null
+      || workflow.unrecognisedCount > 0
+    const pendingLabel = tt('canvas.workflowInspectorPending')
+    const isPlaceholder = !hasAnySignal && workflow.error === pendingLabel
+    if (isPlaceholder) {
+      return <div className={css.workflowPending}><span className={css.workflowPendingSpinner} aria-hidden="true" />{pendingLabel}</div>
+    }
+    if (workflow.status === 'ui-format') {
+      return <div className={css.workflowError}>{workflow.error ?? tt('canvas.workflowInspectorError')}</div>
+    }
+    if (workflow.status === 'error') {
+      return <div className={css.workflowError}>{workflow.error ?? tt('canvas.workflowInspectorError')}</div>
+    }
+    const sections: React.ReactNode[] = []
+    if (workflow.size !== null) {
+      sections.push(<div key="size" className={css.workflowSize}>
+        <span>{tt('canvas.workflowSizeLabel')}</span>
+        <span className={css.workflowSizeValue}>{workflow.size.width} × {workflow.size.height}</span>
+      </div>)
+    }
+    sections.push(<div key="text" className={css.workflowSection}>
+      <div className={css.workflowSectionHeader}>
+        <span>{tt('canvas.workflowTextSection')}</span>
+        <span className={css.workflowSectionCount}>{workflow.textSlots.length}</span>
+      </div>
+      {workflow.textSlots.length === 0
+        ? <div className={css.workflowEmpty}>{tt('canvas.workflowEmptyText')}</div>
+        : <ul className={css.workflowSlotList}>
+            {workflow.textSlots.map(slot => <li key={`${slot.nodeId}:${slot.inputName}`} className={css.workflowSlot}>
+              <span className={css.workflowSlotBadge}>T</span>
+              <span>{slot.label}</span>
+            </li>)}
+          </ul>}
+    </div>)
+    sections.push(<div key="image" className={css.workflowSection}>
+      <div className={css.workflowSectionHeader}>
+        <span>{tt('canvas.workflowImageSection')}</span>
+        <span className={css.workflowSectionCount}>{workflow.imageSlots.length}</span>
+      </div>
+      {workflow.imageSlots.length === 0
+        ? <div className={css.workflowEmpty}>{tt('canvas.workflowEmptyImage')}</div>
+        : <ul className={css.workflowSlotList}>
+            {workflow.imageSlots.map(slot => <li key={`${slot.nodeId}:${slot.inputName}`} className={`${css.workflowSlot} ${css.workflowSlotImage}`}>
+              <span className={css.workflowSlotBadge}>IMG</span>
+              <span>{slot.label}</span>
+            </li>)}
+          </ul>}
+    </div>)
+    sections.push(<div key="advanced" className={css.workflowSection}>
+      <div className={css.workflowSectionHeader}>
+        <span>{tt('canvas.workflowAdvancedSection')}</span>
+        <span className={css.workflowSectionCount}>{workflow.options.length}</span>
+      </div>
+      {workflow.options.length === 0
+        ? <div className={css.workflowEmpty}>{tt('canvas.workflowEmptyAdvanced')}</div>
+        : <ul className={css.workflowSlotList}>
+            {workflow.options.map(option => <li key={`${option.nodeId}:${option.inputName}`} className={css.workflowSlot}>
+              <span className={css.workflowSlotBadge}>{option.type}</span>
+              <span>{option.label}</span>
+            </li>)}
+          </ul>}
+    </div>)
+    if (workflow.unrecognisedCount > 0) {
+      sections.push(<div key="unknown" className={css.workflowHint}>
+        {tt('canvas.workflowUnknownCount', { count: workflow.unrecognisedCount })}
+      </div>)
+    }
+    sections.push(<div key="round2-hint" className={css.workflowHint}>{tt('canvas.workflowRound2Hint')}</div>)
+    if (workflow.status === 'ok') {
+      const isRunning = busyNodes[node.id] === tt('canvas.workflowRunButton')
+      sections.push(<button
+        key="run"
+        type="button"
+        className={css.workflowRunButton}
+        disabled={isRunning || document === null}
+        onPointerDown={event => event.stopPropagation()}
+        onClick={() => { void runWorkflow(node) }}
+      >
+        <ToolbarIcon name="send" size={14} />
+        {isRunning ? tt('canvas.workflowRunRunning') : tt('canvas.workflowRunButton')}
+      </button>)
+    }
+    return <div className={css.workflowBody}>{sections}</div>
+  }
+
   const renderNode = (node: CanvasNode): React.JSX.Element => {
     const metadata = nodeMetadata(node)
     const isSelected = selectedIds.has(node.id)
@@ -3494,6 +3862,7 @@ export function CanvasWorkspace(props: CanvasWorkspaceProps): React.JSX.Element 
     const hasImage = asset !== undefined && asset.url !== ''
     const isConfig = node.type === 'config'
     const isFile = node.type === 'file'
+    const isWorkflow = node.type === 'workflow'
     const isSketch = isSketchNode(node)
     const fileKind = isFile ? (metadata.fileKind ?? fileKindOfAsset(asset ?? { assetId: '', url: '', mime: 'application/octet-stream', bytes: 0, width: 0, height: 0, origin: 'upload' })) : 'other'
     const hasFile = isFile && asset !== undefined && asset.url !== ''
@@ -3516,7 +3885,7 @@ export function CanvasWorkspace(props: CanvasWorkspaceProps): React.JSX.Element 
       key={node.id}
       data-node-id={node.id}
       data-annotating={annotating ? '' : undefined}
-      className={`${css.node} ${isSketch ? css.sketchNode : isConfig ? css.configNode : isTextual ? css.textNode : css.imageNode} ${isSelected ? css.nodeSelected : ''} ${isRelated ? css.nodeRelated : ''} ${isConnectTarget ? css.nodeConnectTarget : ''}`}
+      className={`${css.node} ${isSketch ? css.sketchNode : isConfig ? css.configNode : isWorkflow ? css.workflowNode : isTextual ? css.textNode : css.imageNode} ${isSelected ? css.nodeSelected : ''} ${isRelated ? css.nodeRelated : ''} ${isConnectTarget ? css.nodeConnectTarget : ''}`}
       style={{ left: node.x, top: node.y, width: node.width, height: node.height }}
       onPointerDown={event => handleNodePointerDown(event, node.id)}
       onContextMenu={event => {
@@ -3527,7 +3896,7 @@ export function CanvasWorkspace(props: CanvasWorkspaceProps): React.JSX.Element 
       }}
     >
       <div className={css.nodeGlow} aria-hidden="true" />
-      {isTextual || isSketch ? <header className={css.nodeHeader}>
+      {isTextual || isSketch || isWorkflow ? <header className={css.nodeHeader}>
         <span className={css.nodeTitle}>{node.title}</span>
         {metadata.annotation !== undefined ? <span className={css.nodeTag}>{tt('canvas.annotationTag')}</span> : null}
         {metadata.layer !== undefined ? <span className={css.nodeTag}>{layerKindLabel(metadata.layer.kind)}</span> : null}
@@ -3582,6 +3951,8 @@ export function CanvasWorkspace(props: CanvasWorkspaceProps): React.JSX.Element 
       </div> : null}
       {isConfig
         ? <p className={css.configHint}>{tt('canvas.configHint')}</p>
+        : isWorkflow
+        ? renderWorkflowBody(node)
         : isTextual
         ? <textarea
             className={css.textArea}
@@ -3677,6 +4048,68 @@ export function CanvasWorkspace(props: CanvasWorkspaceProps): React.JSX.Element 
         : null}
       {isAnnotationCard(node)
         ? null
+        : isWorkflow
+        ? (() => {
+            const wf = nodeMetadata(node).workflow
+            const slots = wf === undefined ? [] : [...wf.textSlots, ...wf.imageSlots]
+            if (slots.length === 0) {
+              return <div className={`${css.handle} ${css.handleLeft}`} title={tt('canvas.connectHint')} onPointerDown={event => handleConnectStart(event, node.id, 'target')} />
+            }
+            return <div className={css.workflowInputPorts}>
+              {slots.map(slot => {
+                const handleId = `${slot.nodeId}:${slot.inputName}`
+                const isText = 'classType' in slot && slot.classType === 'CLIPTextEncode'
+                return <div
+                  key={handleId}
+                  className={css.workflowInputPort}
+                  data-handle-id={handleId}
+                  data-port-kind={isText ? 'text' : 'image'}
+                  title={slot.label}
+                  onPointerDown={event => handleConnectStart(event, node.id, 'target')}
+                  onPointerEnter={() => {
+                    // Promote the active drag connection to this specific
+                    // port so the bezier preview snaps to it even if the
+                    // pointer sits on the port's outer box (whose CSS
+                    // hit target is bigger than the actual element the
+                    // browser's elementFromPoint might return at certain
+                    // zoom levels).
+                    const connect = connectRef.current
+                    if (connect === null) return
+                    if (connect.nodeId === node.id) return
+                    const index = slots.findIndex(s => `${s.nodeId}:${s.inputName}` === handleId)
+                    const stride = 36
+                    const stackHeight = slots.length * stride - 4
+                    const stackTop = node.y + node.height / 2 - stackHeight / 2
+                    const portTop = stackTop + index * stride
+                    const next: ConnectState = { ...connect, targetId: node.id, targetHandle: handleId, mouse: { x: node.x, y: portTop + 16 } }
+                    connectRef.current = next
+                    setConnecting(next)
+                  }}
+                  onPointerMove={event => {
+                    // Same promotion as onPointerEnter — repeated on
+                    // every move so a quick drag that started outside
+                    // the port still snaps onto it once the cursor
+                    // crosses the hit area.
+                    const connect = connectRef.current
+                    if (connect === null) return
+                    if (connect.nodeId === node.id) return
+                    if (connect.targetHandle === handleId) return
+                    const index = slots.findIndex(s => `${s.nodeId}:${s.inputName}` === handleId)
+                    const stride = 36
+                    const stackHeight = slots.length * stride - 4
+                    const stackTop = node.y + node.height / 2 - stackHeight / 2
+                    const portTop = stackTop + index * stride
+                    const next: ConnectState = { ...connect, targetId: node.id, targetHandle: handleId, mouse: { x: node.x, y: portTop + 16 } }
+                    connectRef.current = next
+                    setConnecting(next)
+                    event.stopPropagation()
+                  }}
+                >
+                  <span className={css.workflowInputPortBadge}>{isText ? 'T' : 'IMG'}</span>
+                </div>
+              })}
+            </div>
+          })()
         : <>
             <div className={`${css.handle} ${css.handleLeft}`} title={tt('canvas.connectHint')} onPointerDown={event => handleConnectStart(event, node.id, 'target')} />
             <div
@@ -3776,7 +4209,7 @@ export function CanvasWorkspace(props: CanvasWorkspaceProps): React.JSX.Element 
         {visible.map(connection => {
           const from = nodeById.get(connection.fromNodeId)!
           const to = nodeById.get(connection.toNodeId)!
-          const path = bezierPath(nodeAnchor(from, 'right'), nodeAnchor(to, 'left'))
+          const path = bezierPath(nodeAnchor(from, 'right'), nodeAnchor(to, 'left', connection.toHandle))
           const active = connection.id === selectedConnectionId
           return <g key={connection.id}>
             <path
@@ -3807,7 +4240,7 @@ export function CanvasWorkspace(props: CanvasWorkspaceProps): React.JSX.Element 
           const node = nodeById.get(connecting.nodeId)
           if (node === undefined) return null
           const mouse = connecting.targetId !== undefined && connecting.targetId !== null && nodeById.has(connecting.targetId)
-            ? nodeAnchor(nodeById.get(connecting.targetId)!, connecting.handleType === 'source' ? 'left' : 'right')
+            ? nodeAnchor(nodeById.get(connecting.targetId)!, connecting.handleType === 'source' ? 'left' : 'right', connecting.targetHandle)
             : connecting.mouse
           const path = connecting.handleType === 'source'
             ? bezierPath(nodeAnchor(node, 'right'), mouse)
@@ -4018,6 +4451,38 @@ export function CanvasWorkspace(props: CanvasWorkspaceProps): React.JSX.Element 
         <button type="button" role="menuitem" onClick={() => { placeNewNode(createEmptyFileNode(createMenu.world)); setFileTargetNodeId(null); setCreateMenu(null) }}><ToolbarIcon name="file" size={16} />{tt('canvas.skills.addFileNode')}</button>
         <button type="button" role="menuitem" onClick={() => { setFileTargetNodeId(null); fileUploadRef.current?.click(); setCreateMenu(null) }}><ToolbarIcon name="upload" size={16} />{tt('canvas.skills.fileMenuUpload')}</button>
         <button type="button" role="menuitem" onClick={() => { placeNewNode(createConfigNode(createMenu.world)); setCreateMenu(null) }}><ToolbarIcon name="sparkle" size={16} />{tt('canvas.addConfigNode')}</button>
+        {channels !== undefined && channels.length > 0 ? <button type="button" role="menuitem" data-canvas-no-zoom="" onClick={() => { openWorkflowPicker(createMenu.world, createMenu.screen); setCreateMenu(null) }}><ToolbarIcon name="workflow" size={16} />{tt('canvas.addWorkflowNode')}</button> : null}
+      </div>
+    }
+    if (workflowPicker !== null) {
+      // Two-step picker: first screen asks for a channel (only ComfyUI
+      // channels offer workflows), second asks for a model alias plus an
+      // "import JSON" affordance. We re-render in place rather than stack
+      // two popovers so the menu width stays predictable.
+      if (workflowPicker.channelId === undefined) {
+        const channelList = channels ?? []
+        const comfyuiChannels = channelList.filter(channel => channel.id.length > 0 && channel.models.length > 0)
+        return <div className={css.contextMenu} style={{ left: workflowPicker.screen.x, top: workflowPicker.screen.y }} data-canvas-no-zoom="" role="menu">
+          {comfyuiChannels.map(channel => <button key={channel.id} type="button" role="menuitem" onClick={() => { setWorkflowPicker({ ...workflowPicker, channelId: channel.id }) }}>{channel.name}</button>)}
+        </div>
+      }
+      const channelList = channels ?? []
+      const channel = channelList.find(candidate => candidate.id === workflowPicker.channelId)
+      const models = channel?.models ?? []
+      return <div className={css.contextMenu} style={{ left: workflowPicker.screen.x, top: workflowPicker.screen.y }} data-canvas-no-zoom="" role="menu">
+        {models.length === 0
+          ? <button type="button" role="menuitem" disabled>{tt('canvas.workflowEmptyAdvanced')}</button>
+          : models.map(model => <button key={model.alias} type="button" role="menuitem" title={model.alias} onClick={() => { void createWorkflowNode(workflowPicker.world, channel?.id, model.alias); setWorkflowPicker(null) }}>{model.alias.replace(/^comfyui:/, '')}</button>)}
+        <button
+          type="button"
+          role="menuitem"
+          onClick={() => {
+            setWorkflowPicker(null)
+            workflowImportRef.current?.click()
+          }}
+        >
+          <ToolbarIcon name="upload" size={16} />{tt('canvas.workflowImportJson')}
+        </button>
       </div>
     }
     return null
@@ -4157,6 +4622,18 @@ export function CanvasWorkspace(props: CanvasWorkspaceProps): React.JSX.Element 
         <div className={css.dockItem} data-dock-item="" data-label={tt('canvas.addConfigNode')}>
           <IconButton name="sparkle" size={18} label={tt('canvas.addConfigNode')} onClick={() => placeNewNode(createConfigNode())} />
         </div>
+        {channels !== undefined && channels.length > 0 ? <div className={css.dockItem} data-dock-item="" data-label={tt('canvas.addWorkflowNode')}>
+          <IconButton name="workflow" size={18} label={tt('canvas.addWorkflowNode')} onClick={event => {
+            // The contextMenu uses `transform: translate(-50%, -100% - 8px)`
+            // so left/right edges flip around the button centre and the
+            // menu's bottom edge sits 8 px above the button top. Pass the
+            // raw button centre + button top and let the CSS handle the
+            // gap. The default fallback below mirrors the same anchor for
+            // other entry points (right-click createMenu etc.).
+            const rect = event.currentTarget.getBoundingClientRect()
+            openWorkflowPicker(undefined, { x: rect.left + rect.width / 2, y: rect.top })
+          }} />
+        </div> : null}
         <div className={css.dockItem} data-dock-item="" data-label={tt('canvas.templateLibrary')}>
           <IconButton name="template" size={18} label={tt('canvas.templateLibrary')} active={libraryOpen} onClick={() => setLibraryOpen(previous => !previous)} />
         </div>
@@ -4242,6 +4719,17 @@ export function CanvasWorkspace(props: CanvasWorkspaceProps): React.JSX.Element 
         event.target.value = ''
         if (file !== undefined) void uploadCanvasFile(file, fileTargetNodeId)
         setFileTargetNodeId(null)
+      }}
+    />
+    <input
+      ref={workflowImportRef}
+      type="file"
+      accept="application/json,.json"
+      hidden
+      onChange={event => {
+        const file = event.target.files?.[0]
+        event.target.value = ''
+        if (file !== undefined) void importWorkflowJson(file)
       }}
     />
     {skillMenu !== null ? (() => {

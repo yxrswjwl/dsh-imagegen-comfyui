@@ -23,6 +23,10 @@ export interface ChannelDraft {
   name: string
   apiUrl: string
   models: ModelMapping[]
+  /** ComfyUI install directory (host-side fallback when GET /userdata/{file}
+   *  is unavailable on the upstream service). Only meaningful for ComfyUI
+   *  channels; stripped on the wire for other presets. */
+  installDir?: string
 }
 
 /** One staged key edit for a channel. */
@@ -80,12 +84,14 @@ function stripChannel(channel: ChannelDraft): ChannelDraft {
   const models = channel.models
     .map(model => ({ alias: model.alias.trim(), id: model.id.trim() === '' ? model.alias.trim() : model.id.trim() }))
     .filter(model => model.alias !== '')
+  const installDir = (channel.installDir ?? '').trim()
   return {
     id: channel.id,
     preset: channel.preset,
     name: channel.name.trim(),
     apiUrl: channel.apiUrl.trim(),
     models: [...new Map(models.map(model => [model.alias, model])).values()],
+    ...installDir === '' ? {} : { installDir },
   }
 }
 
@@ -253,7 +259,14 @@ export class ChannelsForm {
 
 /** Project a stored channel into a draft (secrets never travel in channels). */
 function toDraft(channel: ChannelConfig): ChannelDraft {
-  return { id: channel.id, preset: channel.preset, name: channel.name, apiUrl: channel.apiUrl, models: channel.models.map(model => ({ ...model })) }
+  return {
+    id: channel.id,
+    preset: channel.preset,
+    name: channel.name,
+    apiUrl: channel.apiUrl,
+    models: channel.models.map(model => ({ ...model })),
+    ...channel.installDir === undefined ? {} : { installDir: channel.installDir },
+  }
 }
 
 /** The scope's current channels value (a plain array), for change detection. */

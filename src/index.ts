@@ -319,7 +319,11 @@ export const inject = ['webServer', 'systemPrompt', 'commands']
 export { makeRoutes } from './routes.ts'
 export { generateImage, ImageGenError } from './engine.ts'
 export { promptCharLimit } from './model-catalog.ts'
+import { isComfyUiPreset } from './comfyui-workflows.ts'
 export { isComfyUiPreset, listComfyUiWorkflows, probeComfyUiService, type ComfyUiProbeResult, type ComfyUiWorkflowEntry, type ComfyUiWorkflowFolder, type ComfyUiWorkflowList } from './comfyui-workflows.ts'
+export { fetchComfyUiWorkflow, injectPromptIntoWorkflow, type ApiWorkflow, type ComfyUiPromptInjection, type InjectionSummary, UiFormatWorkflowError } from './comfyui-workflow-loader.ts'
+export { inspectWorkflow, EMPTY_INSPECTION, PROMPT_NODE_CLASSES, SAMPLER_NODE_CLASSES, type WorkflowInspection, type WorkflowTextSlot, type WorkflowImageSlot, type WorkflowOption, type WorkflowSize, type WorkflowUnknownInput } from './comfyui-workflow-inspect.ts'
+export { waitForComfyUiOutputs, type ComfyUiPromptSubmission } from './comfyui-history.ts'
 export { analyzeLayers, normalizeLayerPlan, MAX_LAYER_IMAGE_BYTES } from './layer-analyzer.ts'
 export { ImageGenerationRuntime } from './generation-runtime.ts'
 export { registerAgentImageTools } from './agent-image-tools.ts'
@@ -428,6 +432,7 @@ export const Config: z<Config> = z.object({
     preset: z.string().default(''),
     name: z.string().default(''),
     apiUrl: z.string().default(''),
+    installDir: z.string().default(''),
     models: z.array(z.object({
       alias: z.string(),
       id: z.string(),
@@ -495,6 +500,12 @@ function normalizeChannels(value: unknown): ChannelConfig[] {
     const raw = item as Record<string, unknown>
     const id = typeof raw.id === 'string' ? raw.id.trim() : ''
     if (id === '') continue
+    const preset = typeof raw.preset === 'string' ? raw.preset : ''
+    // ComfyUI channels must keep their `comfyui:` prefix on every wire
+    // model id (the engine routes by family prefix). Older settings entries
+    // sometimes saved the alias with the prefix but left `id` unprefixed —
+    // patch them up here so old saves keep working without a manual edit.
+    const needsComfyUiPrefix = isComfyUiPreset(preset)
     const models: ModelMapping[] = []
     if (Array.isArray(raw.models)) {
       for (const entry of raw.models) {
@@ -503,14 +514,22 @@ function normalizeChannels(value: unknown): ChannelConfig[] {
         const alias = typeof record.alias === 'string' ? record.alias.trim() : ''
         const upstream = typeof record.id === 'string' ? record.id.trim() : ''
         if (alias === '') continue
-        models.push({ alias, id: upstream === '' ? alias : upstream })
+        let resolvedId = upstream === '' ? alias : upstream
+        if (needsComfyUiPrefix && !resolvedId.startsWith('comfyui:')) {
+          // If the alias is prefixed, prefer that; otherwise prepend it.
+          resolvedId = alias.startsWith('comfyui:') ? alias : `comfyui:${resolvedId}`
+        }
+        models.push({ alias, id: resolvedId })
       }
     }
     out.push({
       id,
-      preset: typeof raw.preset === 'string' ? raw.preset : '',
+      preset,
       name: typeof raw.name === 'string' ? raw.name.trim() : '',
       apiUrl: typeof raw.apiUrl === 'string' ? raw.apiUrl.trim() : '',
+      ...typeof raw.installDir === 'string' && raw.installDir.trim() !== ''
+        ? { installDir: raw.installDir.trim() }
+        : {},
       models,
     })
   }

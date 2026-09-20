@@ -300,7 +300,7 @@ function isNode(value: unknown): value is CanvasNode {
   const node = value as Record<string, unknown>
   if (typeof node.id !== 'string' || typeof node.title !== 'string' || typeof node.x !== 'number'
     || typeof node.y !== 'number' || typeof node.width !== 'number' || typeof node.height !== 'number') return false
-  if (node.type !== 'image' && node.type !== 'text' && node.type !== 'file' && node.type !== 'config') return false
+  if (node.type !== 'image' && node.type !== 'text' && node.type !== 'file' && node.type !== 'config' && node.type !== 'workflow') return false
   const metadata = node.metadata
   if (metadata !== undefined && (metadata === null || typeof metadata !== 'object')) return false
   const state = (metadata ?? {}) as Record<string, unknown>
@@ -314,6 +314,18 @@ function isNode(value: unknown): value is CanvasNode {
   }
   if (node.type === 'config') {
     return state.prompt === undefined || typeof state.prompt === 'string'
+  }
+  if (node.type === 'workflow') {
+    // A workflow node carries the inspector result nested as `state.workflow`
+    // (channel + model alias, fingerprint, status, error, slot arrays).
+    // The outer node-level `status` belongs to the image-generation state
+    // machine and is never set on a workflow node, so accept anything.
+    const nested = (state.workflow ?? {}) as Record<string, unknown>
+    return (nested.channelId === undefined || typeof nested.channelId === 'string')
+      && (nested.modelAlias === undefined || typeof nested.modelAlias === 'string')
+      && (nested.fingerprint === undefined || typeof nested.fingerprint === 'string')
+      && (nested.status === undefined || nested.status === 'ok' || nested.status === 'ui-format' || nested.status === 'error')
+      && (nested.error === undefined || typeof nested.error === 'string')
   }
   return state.text === undefined || typeof state.text === 'string'
 }

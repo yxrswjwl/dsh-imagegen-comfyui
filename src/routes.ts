@@ -7,14 +7,17 @@
 
 import type { IncomingMessage, ServerResponse } from 'node:http'
 import { spawn } from 'node:child_process'
-import { mkdir as fsMkdir } from 'node:fs/promises'
+import { mkdir as fsMkdir, writeFile as fsWriteFile } from 'node:fs/promises'
 import { randomUUID } from 'node:crypto'
 import { homedir } from 'node:os'
+import { imageDataRoot } from './image-storage-path.ts'
 import path from 'node:path'
 import type { WebRoute } from '@deepseek-ai/dsh-host-webserver'
 import type { ImageAttachmentRef, ImageMediaType, SaveImageAttachment } from '@deepseek-ai/dsh-attachment'
 import { SettingsConflictError, type SettingsDescriptor } from '@deepseek-ai/dsh-settings'
 import type { UpstreamConfig } from './engine.ts'
+import { fetchComfyUiWorkflow, UiFormatWorkflowError } from './comfyui-workflow-loader.ts'
+import { inspectWorkflow } from './comfyui-workflow-inspect.ts'
 import { enhancePrompt, listImageModels, listPromptModels, type PromptModelConfig } from './prompt-enhancer.ts'
 import { analyzeLayers, MAX_LAYER_IMAGE_BYTES } from './layer-analyzer.ts'
 import { normalizeImageModels } from './image-models.ts'
@@ -554,7 +557,12 @@ export function makeRoutes(deps: ImageGenRoutesDeps): WebRoute[] {
         return { ok: false, code: 'no-models', message: `渠道「${target?.name ?? ''}」尚未配置模型，请先在设置中添加` }
       }
       const mapping = target!.models.find(model => model.alias === alias)!
-      return { ok: true, request: { ...request, model: alias, upstream: mapping.id, channelId: target!.id, channel: target!.name } }
+      // Use the alias as the wire model id (`upstream`) so family-detection
+      // markers like the `comfyui:` prefix survive intact. Older configs
+      // stored the upstream id without the prefix; falling back to the
+      // mapping id keeps those historical entries routing to the same
+      // workflow path.
+      return { ok: true, request: { ...request, model: alias, upstream: alias !== mapping.id && alias !== '' ? alias : mapping.id, channelId: target!.id, channel: target!.name } }
     }
     const hosting = view.channels.filter(channel => channel.models.some(model => model.alias === asked))
     if (hosting.length === 0) {
@@ -563,7 +571,9 @@ export function makeRoutes(deps: ImageGenRoutesDeps): WebRoute[] {
     }
     const picked = target !== undefined && target.models.some(model => model.alias === asked) ? target : hosting[0]!
     const mapping = picked.models.find(model => model.alias === asked)!
-    return { ok: true, request: { ...request, model: asked, upstream: mapping.id, channelId: picked.id, channel: picked.name } }
+    // See the note above on alias-as-wire-id; preserve the alias when it
+    // carries family-detection markers (the only case today is `comfyui:`).
+    return { ok: true, request: { ...request, model: asked, upstream: asked !== mapping.id && asked !== '' ? asked : mapping.id, channelId: picked.id, channel: picked.name } }
   }
   const guard = (req: IncomingMessage, res: ServerResponse, method: string): boolean => {
     if (!isLoopbackRequest(req)) {
@@ -1830,6 +1840,248 @@ export function makeRoutes(deps: ImageGenRoutesDeps): WebRoute[] {
           writeJson(res, 200, { ok: true, ms: result.ms, key: result.key })
         } catch (error) {
           writeJson(res, 200, { ok: false, code: 'storage-test-failed', message: messageOf(error) })
+        }
+      },
+    },
+    // ----------------------------------------------- canvas workflow inspect
+    // Resolve the model alias on the configured channel into a workflow
+    // path, load the workflow JSON, run it through the inspector, and
+    // return a canvas-ready snapshot. The canvas UI uses the snapshot to
+    // render the workflow node's text / image ports and advanced-options
+    // accordion (round 2). Wiring those ports and feeding them into the
+    // engine is round 3+.
+    {
+      kind: 'exact',
+      path: CANVAS_API.workflowInspect,
+      handler: async (req, res) => {
+        if (!guard(req, res, 'POST')) return
+        const body = await readJsonBody(req)
+        const channelId = typeof body?.channelId === 'string' ? body.channelId.trim() : ''
+        const model = typeof body?.model === 'string' ? body.model.trim() : ''
+        const workflowBody = typeof body?.workflowBody === 'string' ? body.workflowBody : ''
+        if (channelId === '' || model === '') {
+          writeJson(res, 200, { ok: false, code: 'bad-request', message: 'channelId 和 model 都必填' })
+          return
+        }
+        const view = channelViewOf()
+        const channel = view.channels.find(candidate => candidate.id === channelId)
+          ?? view.channels.find(candidate => candidate.id === view.defaultChannelId)
+          ?? view.channels[0]
+        if (channel === undefined) {
+          writeJson(res, 200, { ok: false, code: 'no-channels', message: '尚未配置任何渠道' })
+          return
+        }
+        const mapping = channel.models.find(entry => entry.alias === model || entry.id === model)
+        if (mapping === undefined) {
+          writeJson(res, 200, { ok: false, code: 'image-model-not-configured', message: `模型「${model}」未在渠道「${channel.name}」配置` })
+          return
+        }
+        // The model alias may carry a family prefix (`comfyui:`) that the
+        // engine strips when reading the workflow; mirror that here.
+        const workflowPath = mapping.alias.startsWith('comfyui:')
+          ? mapping.alias.slice('comfyui:'.length)
+          : (mapping.id.trim() === '' ? mapping.alias : mapping.id)
+        try {
+          // Round 3.5: an explicit `workflowBody` (e.g. an API-format JSON
+          // the user uploaded) lets the canvas preview a workflow that is
+          // not on disk yet. We persist it under `imported-workflows/` so
+          // the engine's file-fetcher can hand the same body to ComfyUI
+          // when the user clicks Run.
+          let workflow: ApiWorkflow
+          let inspectedFrom = 'channel'
+          let importedWorkflowPath: string | undefined
+          if (workflowBody !== '') {
+            try {
+              const parsed = JSON.parse(workflowBody) as unknown
+              const probe = inspectWorkflow(parsed)
+              if (probe === null) throw new UiFormatWorkflowError('(已导入) workflow JSON')
+              workflow = parsed as ApiWorkflow
+              inspectedFrom = 'imported'
+              const dir = path.join(imageDataRoot(), 'imported-workflows')
+              await fsMkdir(dir, { recursive: true })
+              importedWorkflowPath = path.join(dir, `${randomUUID()}.json`)
+              await fsWriteFile(importedWorkflowPath, workflowBody, 'utf8')
+            } catch (parseError) {
+              if (parseError instanceof UiFormatWorkflowError) throw parseError
+              throw new UiFormatWorkflowError('(已导入) workflow JSON')
+            }
+          } else {
+            // Pull the workflow via the same loader the engine uses for
+            // generation. This means inspect and generate share the same
+            // fetch logic (HTTP-first with installDir fallback) and the
+            // same UiFormatWorkflowError surface.
+            const upstream: UpstreamConfig = {
+              apiUrl: channel.apiUrl,
+              apiKey: channel.apiKey,
+              ...channel.installDir === undefined ? {} : { installDir: channel.installDir },
+            }
+            workflow = await fetchComfyUiWorkflow(upstream, workflowPath, { installDir: upstream.installDir })
+          }
+          const inspection = inspectWorkflow(workflow)
+          if (inspection === null) {
+            // Should not happen — fetchComfyUiWorkflow would have
+            // raised UiFormatWorkflowError before we got here. Defence
+            // in depth: report the friendly path anyway.
+            writeJson(res, 200, {
+              ok: false,
+              code: 'ui-format',
+              status: 'ui-format',
+              message: `工作流「${workflowPath}」不是 ComfyUI API 格式。请在 ComfyUI 浏览器里用 Save (API Format) 另存。`,
+            })
+            return
+          }
+          // Project the scanner output into the canvas metadata shape.
+          const workflowName = inspectedFrom === 'imported'
+            ? (typeof body?.workflowName === 'string' && body.workflowName.trim() !== '' ? body.workflowName.trim() : '已导入工作流')
+            : (workflowPath.includes('/')
+              ? workflowPath.slice(workflowPath.lastIndexOf('/') + 1)
+              : workflowPath)
+          // Imported workflows need the engine to fetch the file we just
+          // wrote; switch the run-time workflowPath to that local path so
+          // fetchComfyUiWorkflow picks it up via installDir's local
+          // fallback (or absolute path read).
+          const runWorkflowPath = importedWorkflowPath ?? workflowPath
+          // When we wrote a tmp file for an imported workflow, encode
+          // that absolute path as the model alias so generateComfyUiImage
+          // (which strips `comfyui:` and hands the remainder to the
+          // loader) ends up reading the tmp file via the new absolute-path
+          // branch.
+          const runModel = importedWorkflowPath !== undefined
+            ? `comfyui:${importedWorkflowPath}`
+            : mapping.alias
+          writeJson(res, 200, {
+            ok: true,
+            inspection: {
+              channelId: channel.id,
+              channelName: channel.name,
+              model: runModel,
+              workflowPath: runWorkflowPath,
+              workflowName,
+              inspectedFrom,
+              fingerprint: inspection.fingerprint,
+              textSlots: inspection.text.map(slot => ({
+                nodeId: slot.nodeId,
+                inputName: slot.inputName,
+                classType: slot.classType,
+                label: slot.label,
+              })),
+              imageSlots: inspection.image.map(slot => ({
+                nodeId: slot.nodeId,
+                inputName: slot.inputName,
+                classType: slot.classType,
+                label: slot.label,
+              })),
+              options: inspection.options.map(option => ({
+                nodeId: option.nodeId,
+                inputName: option.inputName,
+                classType: option.classType,
+                label: option.label,
+                type: option.type,
+                // Surface the inline default so the canvas UI can
+                // pre-populate the option field. Round 4.3 will let the
+                // user override these; round 4.1/4.2 only display them.
+                defaultValue: option.defaultValue,
+              })),
+              size: inspection.size !== null
+                ? { nodeId: inspection.size.nodeId, width: inspection.size.width, height: inspection.size.height }
+                : null,
+              unrecognisedCount: inspection.unrecognised.length,
+              status: 'ok',
+              advancedOverrides: {},
+            },
+          })
+        } catch (error) {
+          if (error instanceof UiFormatWorkflowError) {
+            writeJson(res, 200, {
+              ok: false,
+              code: 'ui-format',
+              status: 'ui-format',
+              message: error.message,
+            })
+            return
+          }
+          const message = error instanceof Error ? error.message : String(error)
+          writeJson(res, 200, { ok: false, code: 'inspect-failed', status: 'error', message })
+        }
+      },
+    },
+    // ---------------------------------------------------- workflow run (round 4)
+    {
+      kind: 'exact',
+      path: CANVAS_API.runWorkflow,
+      handler: async (req, res) => {
+        if (!guard(req, res, 'POST')) return
+        const body = await readJsonBody(req)
+        const canvasId = typeof body?.canvasId === 'string' ? body.canvasId.trim() : ''
+        const workflowNodeId = typeof body?.workflowNodeId === 'string' ? body.workflowNodeId.trim() : ''
+        if (canvasId === '' || workflowNodeId === '') {
+          writeJson(res, 200, { ok: false, code: 'bad-request', message: 'canvasId 和 workflowNodeId 都必填' })
+          return
+        }
+        const document = await canvas.read(canvasId)
+        if (document === undefined) {
+          writeJson(res, 200, { ok: false, code: 'not-found', message: '画布不存在' })
+          return
+        }
+        const workflowNode = document.nodes.find(node => node.id === workflowNodeId && node.type === 'workflow')
+        if (workflowNode === undefined) {
+          writeJson(res, 200, { ok: false, code: 'not-found', message: '工作流节点不存在' })
+          return
+        }
+        const metadata = workflowNode.metadata?.workflow
+        if (metadata === undefined || metadata.status !== 'ok') {
+          writeJson(res, 200, { ok: false, code: 'workflow-not-ready', message: '工作流尚未分析完成,请稍候' })
+          return
+        }
+        // Collect text inputs: connections into the workflow node, filtered
+        // to text slots whose source is a text node. The first connected
+        // text slot's content becomes the prompt (round 4.1 convention;
+        // round 4.2 will route per `toHandle`).
+        const incoming = document.connections.filter(connection => connection.toNodeId === workflowNodeId)
+        const textParts: string[] = []
+        for (const connection of incoming) {
+          const fromNode = document.nodes.find(node => node.id === connection.fromNodeId)
+          if (fromNode?.type !== 'text') continue
+          const text = typeof fromNode.metadata?.text === 'string' ? fromNode.metadata.text.trim() : ''
+          if (text !== '') textParts.push(text)
+        }
+        if (textParts.length === 0) {
+          writeJson(res, 200, { ok: false, code: 'no-prompt', message: '请先把文本节点连到工作流端口再生成' })
+          return
+        }
+        // Pick a ComfyUI channel whose model alias matches the workflow's
+        // configured model. Round 2 inspection already populated
+        // `model` on the workflow metadata; reuse it for the run.
+        const channelId = metadata.channelId
+        const modelAlias = metadata.model
+        try {
+          const request: GenerateRequest = {
+            mode: 'image',
+            model: modelAlias,
+            prompt: textParts.join('\n\n'),
+            size: 'auto',
+            quality: 'auto',
+            n: 1,
+            detail: '',
+            canvasId,
+            workflowNodeId,
+            // Empty ref array — round 4.1 sends text-only; round 4.4 will
+            // hand image inputs through here.
+            refs: [],
+          }
+          const result = await runtime.run({ ...request, channelId })
+          const images = result.images
+          if (images.length === 0) {
+            writeJson(res, 200, { ok: false, code: 'no-output', message: 'ComfyUI 未返回任何图片' })
+            return
+          }
+          writeJson(res, 200, { ok: true, images, canvasId, workflowNodeId })
+        } catch (error) {
+          const message = error instanceof Error ? error.message : String(error)
+          const code = error instanceof Error && 'code' in error && typeof (error as { code?: unknown }).code === 'string'
+            ? (error as { code: string }).code
+            : 'run-failed'
+          writeJson(res, 200, { ok: false, code, message })
         }
       },
     },
