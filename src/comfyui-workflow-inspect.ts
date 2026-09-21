@@ -284,20 +284,15 @@ export function inspectWorkflow(workflow: unknown): WorkflowInspection | null {
       // branch, not an input the user can wire a different picture to.
       // Skip them so the canvas doesn't render a stray image port.
       if (terminalImageSinkClasses.has(classType) && inputName === 'images') continue
-      // LINK inputs (`[srcNode, slot]` arrays) carry no widget flag and
-      // no `type` field on the wire itself; the inspector recognises them
-      // as image slots only when the upstream node is on the
-      // `imageOutputClasses` list (first pass above).
+      // LINK inputs (`[srcNode, slot]` arrays) are graph edges the workflow
+      // author already wired — they are NOT inputs the user can feed a
+      // picture to, so they never become image ports. A workflow's real
+      // image inputs are `LoadImage.image` (handled below) and IMAGE-typed
+      // inputs that were left unwired (handled in the `inputType ===
+      // 'IMAGE'` branch). (Round 4.5: earlier builds surfaced wired links
+      // like `KSampler.latent_image` / `VAEEncode.pixels` as phantom ports;
+      // the engine cannot replace a link with a filename anyway.)
       if (isLinkedInput(value)) {
-        const linkInfo = parseLink(value)
-        if (linkInfo !== null && outputsImage.has(linkInfo.sourceNodeId)) {
-          image.push({
-            nodeId: id,
-            inputName,
-            classType,
-            label: `${classType} · ${inputName}`,
-          })
-        }
         continue
       }
 
@@ -311,6 +306,22 @@ export function inspectWorkflow(workflow: unknown): WorkflowInspection | null {
         // We still surface the slot so the canvas can show a placeholder
         // when the workflow author wired `LoadImage.image` directly into
         // a sampler input that carries a type annotation.
+        image.push({
+          nodeId: id,
+          inputName,
+          classType,
+          label: `${classType} · ${inputName}`,
+        })
+        continue
+      }
+
+      // `LoadImage.image` is a string *widget* in API format, but
+      // semantically it IS the workflow's image input: the canvas renders
+      // it as a port the user wires an image node to, and the runner
+      // uploads the picture and writes the returned filename back here
+      // (round 4.5). Skip the generic widget-option handling so it does
+      // not also appear as a free-text advanced field.
+      if (classType === 'LoadImage' && inputName === 'image' && typeof value === 'string') {
         image.push({
           nodeId: id,
           inputName,

@@ -1011,6 +1011,13 @@ export interface GenerateRequest extends EcommerceTaskMeta {
    *  image stays in `image`; providers that accept several references get them
    *  all, single-reference providers see `image` alone. */
   images?: string[]
+  /** Canvas workflow image inputs (round 4.5). ComfyUI-only: each entry
+   *  names the workflow node + input to fill (`LoadImage.image` and other
+   *  string image widgets) and carries the canvas image as a data URL. The
+   *  host uploads each image to ComfyUI's `/upload/image` and writes the
+   *  returned filename into the workflow before submitting. Other model
+   *  families ignore the field. */
+  imageSlots?: Array<{ nodeId: string; inputName: string; data: string }>
   /** Original reference-image name, retained in the history entry. */
   refName?: string
   /** Channel this request targets (the host falls back to the default when

@@ -11,7 +11,7 @@
 import type { GeneratedImage, GenerateRequest, GenerateResult } from './protocol.ts'
 import { detectImageMime } from './image-format.ts'
 import { modelFamily, promptCharLimit } from './model-catalog.ts'
-import { applyWorkflowOverrides, fetchComfyUiWorkflow, injectPromptIntoWorkflow, type ApiWorkflow, type InjectionSummary } from './comfyui-workflow-loader.ts'
+import { applyImageFilesIntoWorkflow, applyWorkflowOverrides, fetchComfyUiWorkflow, injectPromptIntoWorkflow, uploadComfyUiImages, type ApiWorkflow, type ComfyUiImageUpload, type InjectionSummary } from './comfyui-workflow-loader.ts'
 import { waitForComfyUiOutputs } from './comfyui-history.ts'
 
 /** The upstream credentials the panel's settings card configures. */
@@ -1032,8 +1032,14 @@ async function generateComfyUiImage(
   // than baking into the workflow file so one imported workflow can serve
   // several canvas nodes with different settings.
   const overrides = safeOverrides(request.overrides)
+  // Round 4.5: canvas reference images. Upload each once, then share the
+  // returned filenames across every parallel sub-run (the workflow JSON
+  // itself is only ever mutated inside `runOneComfyUiWorkflow`, per run).
+  const imageFiles = request.imageSlots !== undefined && request.imageSlots.length > 0
+    ? await uploadComfyUiImages(baseUrl, upstream.apiKey, request.imageSlots, options.signal)
+    : []
   const images = (await Promise.all(
-    Array.from({ length: count }, async () => runOneComfyUiWorkflow(baseUrl, upstream, workflowTemplate, request, overrides, options.signal)),
+    Array.from({ length: count }, async () => runOneComfyUiWorkflow(baseUrl, upstream, workflowTemplate, request, overrides, imageFiles, options.signal)),
   )).flat()
   return { images }
 }
@@ -1056,6 +1062,7 @@ async function runOneComfyUiWorkflow(
   workflowTemplate: ApiWorkflow,
   request: GenerateRequest,
   overrides: Record<string, unknown> | undefined,
+  imageFiles: ComfyUiImageUpload[],
   signal?: AbortSignal,
 ): Promise<GeneratedImage[]> {
   // Deep-clone so the per-run injection does not leak seeds into siblings.
@@ -1074,6 +1081,15 @@ async function runOneComfyUiWorkflow(
       // field the workflow no longer has should degrade to "generate with
       // defaults" rather than blocking the click.
       console.warn('[dsh-imagegen] Some workflow overrides were skipped:', applied.skipped)
+    }
+  }
+  // Round 4.5: write uploaded reference-image filenames into the image
+  // widgets (`LoadImage.image`). Skipped entries degrade to "workflow
+  // keeps its own image" rather than failing the run.
+  if (imageFiles.length > 0) {
+    const imageResult = applyImageFilesIntoWorkflow(workflow, imageFiles)
+    if (imageResult.skipped.length > 0) {
+      console.warn('[dsh-imagegen] Some canvas image slots were skipped:', imageResult.skipped)
     }
   }
   const promptId = await submitComfyUiPrompt(baseUrl, upstream, workflow, signal)

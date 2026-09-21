@@ -511,3 +511,124 @@ function coerceOverride(raw: unknown, previous: unknown): unknown {
   if (typeof raw === 'object') return INVALID_OVERRIDE
   return raw
 }
+
+/* ------------------------------------------------------------------------- */
+/*  Canvas image inputs (round 4.5)                                          */
+/* ------------------------------------------------------------------------- */
+
+/** Parse `data:<mime>;base64,<payload>` into its parts. Undefined for
+ *  anything that is not a base64 data URL. */
+export function parseComfyDataUrl(dataUrl: string): { mime: string; base64: string } | undefined {
+  const match = /^data:([^;,]+)?;base64,([\s\S]*)$/.exec(dataUrl.trim())
+  if (match === null) return undefined
+  return { mime: (match[1] ?? 'application/octet-stream').trim(), base64: match[2] ?? '' }
+}
+
+/** One canvas image slot resolved to a ComfyUI-side filename. */
+export interface ComfyUiImageUpload {
+  nodeId: string
+  inputName: string
+  filename: string
+}
+
+/** Upload canvas reference images to ComfyUI's `/upload/image` and return
+ *  the filenames to write into the workflow's image widgets. Each slot is
+ *  one upload; the results are shared by every parallel sub-run of the
+ *  same request (upload once, inject N times). */
+export async function uploadComfyUiImages(
+  baseUrl: string,
+  apiKey: string,
+  slots: ReadonlyArray<{ nodeId: string; inputName: string; data: string }>,
+  signal?: AbortSignal,
+): Promise<ComfyUiImageUpload[]> {
+  const out: ComfyUiImageUpload[] = []
+  for (const slot of slots) {
+    const parsed = parseComfyDataUrl(slot.data)
+    if (parsed === undefined) {
+      throw new Error(`画布图片数据无效（${slot.nodeId}:${slot.inputName}）：不是合法的 data URL`)
+    }
+    let bytes: Buffer
+    try {
+      bytes = Buffer.from(parsed.base64, 'base64')
+    } catch {
+      throw new Error(`画布图片数据无法解码（${slot.nodeId}:${slot.inputName}）`)
+    }
+    const form = new FormData()
+    form.append('image', new Blob([bytes], { type: parsed.mime }), `canvas-${Date.now()}-${Math.random().toString(36).slice(2, 8)}.${comfyImageExtension(parsed.mime)}`)
+    let response: Response
+    try {
+      response = await fetch(`${baseUrl.replace(/\/+$/, '')}/upload/image`, {
+        method: 'POST',
+        headers: apiKey.trim() !== '' ? { authorization: `Bearer ${apiKey.trim()}` } : {},
+        body: form,
+        signal,
+      })
+    } catch (error) {
+      throw new Error(`上传参考图到 ComfyUI 失败：${error instanceof Error ? error.message : String(error)}`)
+    }
+    if (!response.ok) {
+      throw new Error(`ComfyUI 拒绝上传参考图（HTTP ${response.status}）`)
+    }
+    let payload: unknown
+    try {
+      payload = await response.json()
+    } catch {
+      throw new Error('ComfyUI /upload/image 返回了非 JSON 响应')
+    }
+    if (payload === null || typeof payload !== 'object' || Array.isArray(payload)) {
+      throw new Error('ComfyUI /upload/image 响应格式异常')
+    }
+    const record = payload as Record<string, unknown>
+    const name = record['name']
+    if (typeof name !== 'string' || name.trim() === '') {
+      throw new Error('ComfyUI /upload/image 响应缺少文件名')
+    }
+    const subfolder = record['subfolder']
+    out.push({
+      nodeId: slot.nodeId,
+      inputName: slot.inputName,
+      filename: typeof subfolder === 'string' && subfolder.trim() !== ''
+        ? `${subfolder.trim()}/${name.trim()}`
+        : name.trim(),
+    })
+  }
+  return out
+}
+
+/** Write uploaded image filenames into a workflow's image widgets
+ *  (`LoadImage.image` etc.). Returns applied/skipped diagnostics. */
+export function applyImageFilesIntoWorkflow(
+  workflow: ApiWorkflow,
+  files: ReadonlyArray<ComfyUiImageUpload>,
+): { applied: number; skipped: Array<{ nodeId: string; inputName: string; reason: string }> } {
+  let applied = 0
+  const skipped: Array<{ nodeId: string; inputName: string; reason: string }> = []
+  for (const file of files) {
+    const node = workflow[file.nodeId]
+    if (node === undefined) {
+      skipped.push({ nodeId: file.nodeId, inputName: file.inputName, reason: 'node-missing' })
+      continue
+    }
+    const current = node.inputs?.[file.inputName]
+    if (typeof current !== 'string') {
+      // Only string image widgets (`LoadImage.image`) can take a filename.
+      // LINK inputs (`[src, slot]`) cannot be replaced with a filename
+      // without rebuilding the graph — surface rather than corrupt.
+      skipped.push({ nodeId: file.nodeId, inputName: file.inputName, reason: 'not-a-string-widget' })
+      continue
+    }
+    if (node.inputs === undefined) node.inputs = {}
+    node.inputs[file.inputName] = file.filename
+    applied += 1
+  }
+  return { applied, skipped }
+}
+
+function comfyImageExtension(mime: string): string {
+  if (mime === 'image/png') return 'png'
+  if (mime === 'image/jpeg' || mime === 'image/jpg') return 'jpg'
+  if (mime === 'image/webp') return 'webp'
+  if (mime === 'image/gif') return 'gif'
+  if (mime === 'image/bmp') return 'bmp'
+  return 'png'
+}

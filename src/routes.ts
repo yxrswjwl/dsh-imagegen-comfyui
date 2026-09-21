@@ -2049,6 +2049,30 @@ export function makeRoutes(deps: ImageGenRoutesDeps): WebRoute[] {
           writeJson(res, 200, { ok: false, code: 'no-prompt', message: '请先把文本节点连到工作流端口再生成' })
           return
         }
+        // Round 4.5: image connections — an image node wired into an image
+        // slot (`toHandle` = `${nodeId}:${inputName}`). The asset lives on
+        // the host (`asset.url` = /api/dsh-imagegen/canvas/asset/<file>);
+        // read the bytes back and forward them to the engine as a data URL,
+        // which uploads each to ComfyUI and writes the filename into the
+        // workflow's image widget.
+        const imageSlots: Array<{ nodeId: string; inputName: string; data: string }> = []
+        for (const connection of incoming) {
+          const fromNode = document.nodes.find(node => node.id === connection.fromNodeId)
+          if (fromNode?.type !== 'image') continue
+          const asset = fromNode.metadata?.asset
+          if (asset === undefined || typeof connection.toHandle !== 'string') continue
+          const separator = connection.toHandle.indexOf(':')
+          if (separator <= 0 || separator === connection.toHandle.length - 1) continue
+          const file = asset.url.slice(asset.url.lastIndexOf('/') + 1)
+          if (file === '') continue
+          const read = await canvas.readAsset(file)
+          if (read === undefined) continue
+          imageSlots.push({
+            nodeId: connection.toHandle.slice(0, separator),
+            inputName: connection.toHandle.slice(separator + 1),
+            data: `data:${read.mime};base64,${read.data.toString('base64')}`,
+          })
+        }
         // Pick a ComfyUI channel whose model alias matches the workflow's
         // configured model. Round 2 inspection already populated
         // `model` on the workflow metadata; reuse it for the run.
@@ -2083,10 +2107,11 @@ export function makeRoutes(deps: ImageGenRoutesDeps): WebRoute[] {
             // Canvas lineage: the history entry gets attributed to this
             // canvas and back to the workflow node that triggered it.
             canvas: { canvasId, sourceNodeId: workflowNodeId },
-            // Round 4.1 sends text only. Round 4.4 will fill `image` /
-            // `images` (data URLs) from image nodes wired into the
-            // workflow's image ports.
+            // Round 4.1 sends text only. Round 4.5 fills `imageSlots`
+            // (data URLs) from image nodes wired into the workflow's
+            // image ports.
             ...overrides === undefined ? {} : { overrides },
+            ...imageSlots.length === 0 ? {} : { imageSlots },
           }
           const result = await runtime.run({ ...request, channelId }, controller.signal)
           const images = result.images
