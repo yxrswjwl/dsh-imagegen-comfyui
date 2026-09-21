@@ -12,9 +12,10 @@ import {
   Layers, Map as MapIcon, Maximize, Maximize2, MousePointer2, Palette, Pencil, Plus, Redo2, Scissors, SendHorizonal, Sparkles,
   SquareDashedMousePointer, Trash2, Type, Undo2, Upload, Wand2, Wallpaper, Workflow, X,
 } from 'lucide-react'
-import type { CanvasAnnotation, CanvasAssetRef, CanvasConnection, CanvasDocument, CanvasFileKind, CanvasLayerInfo, CanvasLayerPlanItem, CanvasNode, CanvasRect, CanvasSkillConfigApplyResult, CanvasSkillConfigField, CanvasSkillConfigSaveResult, CanvasSkillConfigStep, CanvasSkillConfigView, CanvasSkillDescriptor, CanvasSkillLibrary, CanvasSkillOutput, CanvasSkillRunRequest, CanvasSkillTask, CanvasSketchStroke, GenerateRequest, GenerationTask, HistoryEntry } from '../protocol.ts'
+import type { CanvasAnnotation, CanvasAssetRef, CanvasConnection, CanvasDocument, CanvasFileKind, CanvasLayerInfo, CanvasLayerPlanItem, CanvasNode, CanvasRect, CanvasSkillConfigApplyResult, CanvasSkillConfigField, CanvasSkillConfigSaveResult, CanvasSkillConfigStep, CanvasSkillConfigView, CanvasSkillDescriptor, CanvasSkillLibrary, CanvasSkillOutput, CanvasSkillRunRequest, CanvasSkillTask, CanvasSketchStroke, CanvasWorkflowNodeMeta, GenerateRequest, GenerationTask, HistoryEntry } from '../protocol.ts'
 import type { ImageGenApi } from './api.ts'
 import { errorMessage, tt } from './helpers.ts'
+import { localizeWidgetName } from './workflow-labels.ts'
 import { autoRemoveBackground, canvasToDataUrl, compositeAnnotatedResult, containRect, cropRaster, drawAnnotation, loadRaster, rectBetween, transparencyRatio } from './image-ops.ts'
 import { TemplateLibrary } from './TemplateLibrary.tsx'
 import { CanvasFileBody, CanvasFileOverlay, fileKindLabel, fileKindOfAsset, fileSizeLabel } from './CanvasFilePreview.tsx'
@@ -1205,6 +1206,11 @@ export function CanvasWorkspace(props: CanvasWorkspaceProps): React.JSX.Element 
   const [projects, setProjects] = useState<ProjectSummary[]>([])
   const [document, setDocument] = useState<CanvasDocument | null>(null)
   const [selectedIds, setSelectedIds] = useState<Set<string>>(() => new Set())
+  /** Round 4.3: workflow nodes whose "高级参数" accordion is expanded.
+   *  Kept per node id (not per node object) so a metadata patch — which
+   *  re-creates the node object on every keystroke — doesn't collapse the
+   *  panel the user is typing into. */
+  const [openWorkflowAdvanced, setOpenWorkflowAdvanced] = useState<Set<string>>(() => new Set())
   const [selectedConnectionId, setSelectedConnectionId] = useState<string | null>(null)
   const [tool, setTool] = useState<CanvasTool>('select')
   const [spacePressed, setSpacePressed] = useState(false)
@@ -1591,6 +1597,45 @@ export function CanvasWorkspace(props: CanvasWorkspaceProps): React.JSX.Element 
       : node))
   }, [updateNodes])
 
+  /** Patch a workflow node's nested `metadata.workflow` snapshot without
+   *  clobbering the sibling fields (the inspection snapshot is large and
+   *  `patchNode` only shallow-merges metadata). Used by the round-4.3
+   *  advanced-options accordion. */
+  const patchWorkflowMeta = useCallback((nodeId: string, patch: Partial<CanvasWorkflowNodeMeta>): void => {
+    updateNodes(nodes => nodes.map(node => {
+      if (node.id !== nodeId) return node
+      const metadata = nodeMetadata(node)
+      const workflow = metadata.workflow
+      if (workflow === undefined) return node
+      return { ...node, metadata: { ...metadata, workflow: { ...workflow, ...patch } } }
+    }))
+  }, [updateNodes])
+
+  /** Write one widget override into a workflow node's metadata. `value`
+   *  === undefined clears the entry (falls back to the workflow's own
+   *  default at run time). */
+  const setWorkflowOverride = useCallback((nodeId: string, key: string, value: unknown): void => {
+    updateNodes(nodes => nodes.map(node => {
+      if (node.id !== nodeId) return node
+      const metadata = nodeMetadata(node)
+      const workflow = metadata.workflow
+      if (workflow === undefined) return node
+      const next = { ...(workflow.advancedOverrides ?? {}) }
+      if (value === undefined) delete next[key]
+      else next[key] = value
+      return { ...node, metadata: { ...metadata, workflow: { ...workflow, advancedOverrides: next } } }
+    }))
+  }, [updateNodes])
+
+  const toggleWorkflowAdvanced = useCallback((nodeId: string): void => {
+    setOpenWorkflowAdvanced(previous => {
+      const next = new Set(previous)
+      if (next.has(nodeId)) next.delete(nodeId)
+      else next.add(nodeId)
+      return next
+    })
+  }, [])
+
   /** A workflow node carries a ComfyUI workflow reference plus an
    *  inspection snapshot the host returns. The host endpoint resolves
    *  the channel + model pair, reads the workflow file, runs the
@@ -1708,6 +1753,36 @@ export function CanvasWorkspace(props: CanvasWorkspaceProps): React.JSX.Element 
     return node
   }, [api, channels, patchNode, placeNewNode])
 
+  /** Persist the canvas immediately instead of waiting for the 650 ms
+   *  autosave debounce. The canvas run endpoints read the document from
+   *  disk, so anything the user typed in the last moment — a widget
+   *  override, a prompt — would otherwise be missing from the run. Keeps
+   *  the local document (the user may be mid-drag) and only syncs the
+   *  revision + `syncedRef` so the debounce effect doesn't re-save. */
+  const flushCanvas = useCallback(async (): Promise<CanvasDocument | null> => {
+    const current = documentRef.current
+    if (current === null) return null
+    const saveWithRetry = async (): Promise<CanvasDocument> => {
+      try {
+        return await api.canvasSave(current, current.revision)
+      } catch (caught) {
+        // Another window saved the same canvas meanwhile: rebase on the
+        // server revision and retry once, mirroring the autosave effect.
+        const message = caught instanceof Error ? caught.message : String(caught)
+        if (!message.includes('其他窗口')) throw caught
+        const server = await api.canvasRead(current.id)
+        return await api.canvasSave(current, server.revision)
+      }
+    }
+    const saved = await saveWithRetry()
+    // Bump the revision in place (same key order, so the debounce effect's
+    // JSON comparison stays stable) rather than replacing the document.
+    updateDocument(previous => ({ ...previous, revision: saved.revision }))
+    syncedRef.current = JSON.stringify({ ...current, revision: saved.revision })
+    setSaveState('saved')
+    return saved
+  }, [api, updateDocument])
+
   /** Run one workflow node via the host's run endpoint. The host collects
    *  text inputs from connections, builds a GenerateRequest, runs the
    *  engine synchronously, and returns generated images as base64. We
@@ -1719,11 +1794,19 @@ export function CanvasWorkspace(props: CanvasWorkspaceProps): React.JSX.Element 
     const runLabel = tt('canvas.workflowRunButton')
     setBusyNodes(previous => ({ ...previous, [node.id]: runLabel }))
     try {
+      // The host reads the canvas document from disk, so flush the current
+      // one first — otherwise a widget override the user just typed (the
+      // autosave debounce is 650 ms) never reaches the engine.
+      await flushCanvas()
       const result = await api.canvasRunWorkflow(current.id, node.id)
       if (!result.ok) {
+        // Round 4.4: surface the failure on the node itself, not only in
+        // the top toast — a run error used to be invisible ("永远生成中").
         setError(result.message)
+        patchWorkflowMeta(node.id, { lastRunError: result.message, lastRunAt: Date.now() })
         return
       }
+      patchWorkflowMeta(node.id, { lastRunError: undefined, lastRunAt: Date.now() })
       if (result.images.length === 0) return
       // Materialise each generated image as an asset and place an image
       // node to the right of the workflow node, snapped vertically.
@@ -1740,7 +1823,9 @@ export function CanvasWorkspace(props: CanvasWorkspaceProps): React.JSX.Element 
       }
       setNotice(tt('canvas.workflowRunComplete', { count: result.images.length }))
     } catch (caught) {
-      setError(caught instanceof Error ? caught.message : String(caught))
+      const message = caught instanceof Error ? caught.message : String(caught)
+      setError(message)
+      patchWorkflowMeta(node.id, { lastRunError: message, lastRunAt: Date.now() })
     } finally {
       setBusyNodes(previous => {
         const next = { ...previous }
@@ -1748,7 +1833,7 @@ export function CanvasWorkspace(props: CanvasWorkspaceProps): React.JSX.Element 
         return next
       })
     }
-  }, [api, mutate])
+  }, [api, flushCanvas, mutate, patchWorkflowMeta])
 
   /** Sketch board write-backs. Stroke edits bypass history (the board has its
    *  own stroke-level undo); asset sync happens inside SketchBoard. */
@@ -3440,7 +3525,11 @@ export function CanvasWorkspace(props: CanvasWorkspaceProps): React.JSX.Element 
             // we remember its id so the connection persists `toHandle`
             // and the engine can route the source value to the right slot.
             if (node.type === 'workflow') {
-              const element = document.elementFromPoint(event.clientX, event.clientY)
+              // `window.document` on purpose: this component shadows the
+              // DOM global with its own `document` state (the canvas
+              // document), and reaching for `document.elementFromPoint`
+              // here would call into the canvas object and throw.
+              const element = window.document.elementFromPoint(event.clientX, event.clientY)
               const port = element?.closest('[data-handle-id]')
               const handleId = port?.getAttribute('data-handle-id')
               if (handleId !== null && handleId !== undefined && handleId !== '') targetHandle = handleId
@@ -3780,6 +3869,23 @@ export function CanvasWorkspace(props: CanvasWorkspaceProps): React.JSX.Element 
       return <div className={css.workflowError}>{workflow.error ?? tt('canvas.workflowInspectorError')}</div>
     }
     const sections: React.ReactNode[] = []
+    // Round 4.4: the last run's error lives on the node itself, so a
+    // failed generation is visible on the canvas (and survives a reload),
+    // not only in a transient toast. Cleared by the next successful run
+    // or by the × button.
+    if (workflow.lastRunError !== undefined && workflow.lastRunError !== '') {
+      sections.push(<div key="run-error" className={css.workflowRunError} data-canvas-no-zoom="">
+        <span className={css.workflowRunErrorText}><b>{tt('canvas.workflowRunErrorLabel')}</b>：{workflow.lastRunError}</span>
+        <button
+          type="button"
+          className={css.workflowRunErrorDismiss}
+          title={tt('canvas.workflowOptionReset')}
+          aria-label={tt('canvas.workflowOptionReset')}
+          onPointerDown={event => event.stopPropagation()}
+          onClick={() => patchWorkflowMeta(node.id, { lastRunError: undefined })}
+        >×</button>
+      </div>)
+    }
     if (workflow.size !== null) {
       sections.push(<div key="size" className={css.workflowSize}>
         <span>{tt('canvas.workflowSizeLabel')}</span>
@@ -3814,26 +3920,118 @@ export function CanvasWorkspace(props: CanvasWorkspaceProps): React.JSX.Element 
             </li>)}
           </ul>}
     </div>)
+    // ---- advanced options accordion (round 4.3) --------------------------
+    // Grouped by node so the KSampler / latent-size / loader fields read as
+    // a few short lists instead of one 17-row wall. Every field starts
+    // empty and shows the workflow's own value as a placeholder: an empty
+    // field means "leave the workflow alone", which is what lets the
+    // imported JSON stay the single source of truth.
+    const overrides = workflow.advancedOverrides ?? {}
+    const overrideCount = Object.keys(overrides).length
+    const advancedOpen = openWorkflowAdvanced.has(node.id)
+    const optionGroups: Array<{ nodeId: string; classType: string; items: typeof workflow.options }> = []
+    for (const option of workflow.options) {
+      const last = optionGroups[optionGroups.length - 1]
+      if (last !== undefined && last.nodeId === option.nodeId) last.items.push(option)
+      else optionGroups.push({ nodeId: option.nodeId, classType: option.classType, items: [option] })
+    }
+    const renderOptionField = (option: (typeof workflow.options)[number]): React.JSX.Element => {
+      const key = `${option.nodeId}:${option.inputName}`
+      const raw = overrides[key]
+      const overridden = raw !== undefined
+      const placeholder = option.defaultValue === undefined ? '' : String(option.defaultValue)
+      const commit = (value: unknown): void => { setWorkflowOverride(node.id, key, value) }
+      const isBool = option.type === 'BOOLEAN' || typeof option.defaultValue === 'boolean'
+      const isNumber = !isBool && (option.type === 'INT' || option.type === 'FLOAT' || typeof option.defaultValue === 'number')
+      return <label key={key} className={css.workflowOptionField} data-overridden={overridden ? 'true' : 'false'}>
+        <span className={css.workflowOptionName} title={`${option.classType} · ${option.inputName}`}>{localizeWidgetName(option.inputName)}</span>
+        {isBool
+          ? <input
+              type="checkbox"
+              className={css.workflowOptionCheckbox}
+              checked={raw === undefined ? option.defaultValue === true : raw === true || raw === 'true'}
+              onPointerDown={event => event.stopPropagation()}
+              onChange={event => commit(event.target.checked)}
+            />
+          : <input
+              type={isNumber ? 'number' : 'text'}
+              className={css.workflowOptionInput}
+              value={raw === undefined ? '' : String(raw)}
+              placeholder={placeholder}
+              step={option.type === 'FLOAT' ? 'any' : isNumber ? '1' : undefined}
+              onPointerDown={event => event.stopPropagation()}
+              onChange={event => {
+                const text = event.target.value
+                // An emptied field drops the override so the workflow's own
+                // value comes back — that's how "reset one field" works.
+                if (text === '') { commit(undefined); return }
+                // Commit the raw text even for numeric fields: the host
+                // coerces it against the workflow's own value type, and a
+                // controlled number input would otherwise eat the dot in a
+                // half-typed '1.' (Number('1.') === 1, so the field snaps
+                // back to '1' and the user can never type a decimal).
+                commit(text)
+              }}
+            />}
+        {overridden
+          ? <button
+              type="button"
+              className={css.workflowOptionReset}
+              title={tt('canvas.workflowOptionReset')}
+              onPointerDown={event => event.stopPropagation()}
+              onClick={() => commit(undefined)}
+            >×</button>
+          : null}
+      </label>
+    }
     sections.push(<div key="advanced" className={css.workflowSection}>
-      <div className={css.workflowSectionHeader}>
+      <button
+        type="button"
+        className={css.workflowAccordionHeader}
+        aria-expanded={advancedOpen}
+        onPointerDown={event => event.stopPropagation()}
+        onClick={() => toggleWorkflowAdvanced(node.id)}
+      >
+        <span className={css.workflowAccordionCaret} data-open={advancedOpen ? 'true' : 'false'}>▸</span>
         <span>{tt('canvas.workflowAdvancedSection')}</span>
-        <span className={css.workflowSectionCount}>{workflow.options.length}</span>
-      </div>
-      {workflow.options.length === 0
-        ? <div className={css.workflowEmpty}>{tt('canvas.workflowEmptyAdvanced')}</div>
-        : <ul className={css.workflowSlotList}>
-            {workflow.options.map(option => <li key={`${option.nodeId}:${option.inputName}`} className={css.workflowSlot}>
-              <span className={css.workflowSlotBadge}>{option.type}</span>
-              <span>{option.label}</span>
-            </li>)}
-          </ul>}
+        <span className={css.workflowSectionCount}>
+          {overrideCount > 0 ? tt('canvas.workflowOverrideCount', { count: overrideCount, total: workflow.options.length }) : workflow.options.length}
+        </span>
+      </button>
+      {advancedOpen
+        ? (workflow.options.length === 0
+            ? <div className={css.workflowEmpty}>{tt('canvas.workflowEmptyAdvanced')}</div>
+            : <div className={css.workflowOptionGroups}>
+                <label className={css.workflowOptionField} data-overridden="false">
+                  <span className={css.workflowOptionName}>{tt('canvas.workflowRunCount')}</span>
+                  <input
+                    type="number"
+                    min={1}
+                    max={4}
+                    className={css.workflowOptionInput}
+                    value={workflow.runCount ?? 1}
+                    onPointerDown={event => event.stopPropagation()}
+                    onChange={event => {
+                      const n = Math.round(Number(event.target.value))
+                      patchWorkflowMeta(node.id, { runCount: Number.isFinite(n) ? Math.min(4, Math.max(1, n)) : 1 })
+                    }}
+                  />
+                </label>
+                {optionGroups.map(group => <div key={group.nodeId} className={css.workflowOptionGroup}>
+                  <div className={css.workflowOptionGroupHeader}>
+                    <span>{group.classType}</span>
+                    <span className={css.workflowOptionGroupId}>#{group.nodeId}</span>
+                  </div>
+                  {group.items.map(renderOptionField)}
+                </div>)}
+              </div>)
+        : null}
     </div>)
     if (workflow.unrecognisedCount > 0) {
       sections.push(<div key="unknown" className={css.workflowHint}>
         {tt('canvas.workflowUnknownCount', { count: workflow.unrecognisedCount })}
       </div>)
     }
-    sections.push(<div key="round2-hint" className={css.workflowHint}>{tt('canvas.workflowRound2Hint')}</div>)
     if (workflow.status === 'ok') {
       const isRunning = busyNodes[node.id] === tt('canvas.workflowRunButton')
       sections.push(<button
@@ -3848,7 +4046,10 @@ export function CanvasWorkspace(props: CanvasWorkspaceProps): React.JSX.Element 
         {isRunning ? tt('canvas.workflowRunRunning') : tt('canvas.workflowRunButton')}
       </button>)
     }
-    return <div className={css.workflowBody}>{sections}</div>
+    // Round 4.4: `data-canvas-no-zoom` hands the wheel to the node body's
+    // own scrollbar (`.workflowBody { overflow-y: auto }`); without it the
+    // canvas-level wheel handler zoomed the whole viewport instead.
+    return <div className={css.workflowBody} data-canvas-no-zoom="">{sections}</div>
   }
 
   const renderNode = (node: CanvasNode): React.JSX.Element => {

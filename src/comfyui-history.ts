@@ -34,6 +34,11 @@ const COMFY_POLL_DEADLINE_MS = 600_000
 const COMFY_POLL_INITIAL_MS = 800
 /** Per-poll HTTP timeout (the server's WS status doesn't always reflect /history). */
 const COMFY_POLL_HTTP_TIMEOUT_MS = 15_000
+/** After submission the job must be in ComfyUI's queue; the queue UI can
+ *  remove a *pending* job without ever writing a history entry, so after
+ *  this grace window we consult `/queue` and treat "nowhere to be found"
+ *  as a cancel instead of polling to the 600 s deadline. */
+const QUEUE_MISS_GRACE_MS = 30_000
 
 /** One workflow run submission. */
 export interface ComfyUiPromptSubmission {
@@ -113,6 +118,59 @@ function renderMessages(messages: unknown): string {
   return parts.join(' / ')
 }
 
+/** Kinds of the structured messages in a history entry
+ *  (`execution_start`, `execution_cached`, `execution_interrupted`, …). */
+function messageKinds(messages: unknown): string[] {
+  if (!Array.isArray(messages)) return []
+  const kinds: string[] = []
+  for (const entry of messages) {
+    if (Array.isArray(entry) && typeof entry[0] === 'string') kinds.push(entry[0])
+  }
+  return kinds
+}
+
+/** Whether a prompt id is still present in ComfyUI's `/queue`
+ *  (`queue_running` or `queue_pending`). Returns null when the queue
+ *  endpoint is unreachable so callers treat that as "unknown" rather than
+ *  assuming the job vanished. */
+async function promptIdInComfyQueue(
+  baseUrl: string,
+  apiKey: string,
+  promptId: string,
+  signal?: AbortSignal,
+): Promise<boolean | null> {
+  const controller = new AbortController()
+  const onAbort = () => { controller.abort(signal?.reason) }
+  if (signal !== undefined && signal.aborted === true) onAbort()
+  else if (signal !== undefined) signal.addEventListener('abort', onAbort, { once: true })
+  const timer = setTimeout(() => { controller.abort(new DOMException('Timed out', 'TimeoutError')) }, 5000)
+  timer.unref()
+  try {
+    const response = await fetch(`${baseUrl}/queue`, {
+      method: 'GET',
+      headers: apiKey.trim() !== '' ? { authorization: `Bearer ${apiKey.trim()}` } : {},
+      signal: controller.signal,
+    })
+    if (!response.ok) return null
+    const payload: unknown = await response.json()
+    if (payload === null || typeof payload !== 'object' || Array.isArray(payload)) return null
+    const record = payload as Record<string, unknown>
+    for (const key of ['queue_running', 'queue_pending']) {
+      const list = record[key]
+      if (!Array.isArray(list)) continue
+      for (const item of list) {
+        if (Array.isArray(item) && item[0] === promptId) return true
+      }
+    }
+    return false
+  } catch {
+    return null
+  } finally {
+    clearTimeout(timer)
+    signal?.removeEventListener('abort', onAbort)
+  }
+}
+
 /**
  * Wait for one ComfyUI run to finish, then read its output images and
  * return them as base64 `GeneratedImage[]`.
@@ -129,8 +187,10 @@ export async function waitForComfyUiOutputs(
   signal?: AbortSignal,
 ): Promise<GeneratedImage[]> {
   const deadline = Date.now() + COMFY_POLL_DEADLINE_MS
+  const startedAt = Date.now()
   let delay = COMFY_POLL_INITIAL_MS
   let lastEntry: ComfyUiHistoryEntry | undefined
+  let queueMisses = 0
   while (Date.now() < deadline) {
     if (signal !== undefined && signal.aborted === true) throw new ImageGenError('任务已取消', 'cancelled')
     const remaining = deadline - Date.now()
@@ -159,8 +219,23 @@ export async function waitForComfyUiOutputs(
     clearTimeout(timer)
     signal?.removeEventListener('abort', onAbort)
     if (response.status === 404) {
-      // ComfyUI only writes the history entry once the workflow is queued;
-      // 404 means "not yet started", keep polling.
+      // Not in history yet: either still queued or the user removed it from
+      // the queue UI (ComfyUI never writes a history entry for a job that
+      // is cancelled while pending). Give the queue a grace window after
+      // submission, then consult `/queue` — if the id is nowhere to be
+      // found, the job is gone; report it instead of polling to the 600 s
+      // deadline. Two consecutive misses avoid a transient race.
+      if (Date.now() - startedAt > QUEUE_MISS_GRACE_MS) {
+        const inQueue = await promptIdInComfyQueue(baseUrl, apiKey, promptId, signal)
+        if (inQueue === false) {
+          queueMisses += 1
+          if (queueMisses >= 2) {
+            throw new ImageGenError('ComfyUI 任务已被取消或从队列移除', 'comfyui-cancelled')
+          }
+        } else {
+          queueMisses = 0
+        }
+      }
       await sleep(delay, signal)
       delay = Math.min(4000, delay * 2)
       continue
@@ -186,13 +261,26 @@ export async function waitForComfyUiOutputs(
     const status = entry.status
     const completed = status !== undefined && status.completed === true
     const statusValue = (status?.status_str ?? '').toLowerCase()
+    // A cancelled / interrupted / failed run never reaches `completed: true`:
+    // ComfyUI writes the entry with `completed: false` and `status_str:
+    // 'error'` (plus an `execution_interrupted` message when the user hit
+    // cancel in the queue UI). Detect that immediately instead of polling to
+    // the deadline — a manual cancel must surface on the canvas node at once.
+    if (!completed && (statusValue === 'error' || statusValue === 'failed' || statusValue === 'canceled' || statusValue === 'cancelled')) {
+      const messages = renderMessages(status?.messages)
+      const interrupted = messageKinds(status?.messages).includes('execution_interrupted')
+        || statusValue === 'canceled' || statusValue === 'cancelled'
+      throw new ImageGenError(
+        interrupted
+          ? 'ComfyUI 任务已被取消（可能是在 ComfyUI 界面手动结束）'
+          : `ComfyUI 运行失败：${messages !== '' ? messages : statusValue}`,
+        interrupted ? 'comfyui-cancelled' : 'comfyui-failed',
+      )
+    }
     if (!completed) {
       await sleep(delay, signal)
       delay = Math.min(4000, delay * 2)
       continue
-    }
-    if (statusValue === 'error' || statusValue === 'failed' || statusValue === 'canceled' || statusValue === 'cancelled') {
-      throw new ImageGenError(`ComfyUI 运行失败：${renderMessages(status?.messages) || statusValue}`, 'comfyui-failed')
     }
     const outputs = collectOutputs(entry)
     if (outputs.length === 0) {

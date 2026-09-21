@@ -858,14 +858,27 @@ export interface CanvasWorkflowNodeMeta {
   size: { nodeId: string; width: number; height: number } | null
   /** Count of unrecognised inputs (kept terse to avoid metadata bloat). */
   unrecognisedCount: number
-  /** User-overridden values for the widget options (round 4 runner
-   *  reads these; round 2 leaves them empty). */
+  /** User-overridden values for the widget options, keyed
+   *  `${nodeId}:${inputName}`. The ComfyUI runner writes each entry back
+   *  into the workflow JSON right before submitting (round 4.3). */
   advancedOverrides: Record<string, unknown>
+  /** How many times to run the workflow on one click (1-4). Each run gets
+   *  a fresh random seed unless the user pinned `seed` in
+   *  `advancedOverrides`. Multiplies with the workflow's own
+   *  `batch_size`, so 2 runs of a batch_size=2 workflow yield 4 images. */
+  runCount?: number
   /** Inspect status: 'ok' once the host returned a usable inspection;
    *  'ui-format' / 'error' for the two ways creation can fail. */
   status: 'ok' | 'ui-format' | 'error'
   /** Actionable message for the failing status. */
   error?: string
+  /** Human-readable error from the most recent *run* (not the inspect).
+   *  Written by the canvas UI when a run fails so the node itself shows
+   *  what went wrong instead of silently dropping back to idle. Cleared
+   *  by the next successful run. (Round 4.4.) */
+  lastRunError?: string
+  /** Epoch ms of the most recent run attempt (success or failure). */
+  lastRunAt?: number
 }
 
 export interface CanvasNode {
@@ -1014,6 +1027,13 @@ export interface GenerateRequest extends EcommerceTaskMeta {
   comparisonModels?: string[]
   /** Optional canvas lineage metadata. */
   canvas?: CanvasTaskMeta
+  /** Round 4.3: per-widget overrides for ComfyUI workflows. The host
+   *  runner reads this and writes the values back into the workflow JSON
+   *  (`workflow["<nodeId>"].inputs["<inputName>"]`) before submitting.
+   *  Keys take the form `${nodeId}:${inputName}` so the client can carry
+   *  a flat map without having to know node topology. Non-ComfyUI
+   *  channels ignore the field. */
+  overrides?: Record<string, unknown>
 }
 
 /** One generated image, normalized host-side to base64 so the browser never

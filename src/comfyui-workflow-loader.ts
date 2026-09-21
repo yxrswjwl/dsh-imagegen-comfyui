@@ -404,3 +404,110 @@ export function injectPromptIntoWorkflow(
     noiseSeed,
   }
 }
+
+/** One override the canvas asked for, resolved against the workflow. */
+export interface AppliedWorkflowOverride {
+  nodeId: string
+  inputName: string
+  /** Value actually written (after type coercion). */
+  value: unknown
+  /** The value that was there before (undefined when the input is new). */
+  previous: unknown
+}
+
+/** Outcome of applying the canvas's advanced-override map. */
+export interface WorkflowOverrideResult {
+  applied: AppliedWorkflowOverride[]
+  /** Keys we could not apply, with the reason — surfaced to the user so a
+   *  typo'd node id doesn't silently do nothing. */
+  skipped: Array<{ key: string; reason: 'malformed-key' | 'node-not-found' | 'invalid-value' }>
+}
+
+/**
+ * Round 4.3: write the canvas's per-widget overrides back into a ComfyUI
+ * workflow JSON in place.
+ *
+ * Keys are `${nodeId}:${inputName}` — a flat map so the client never has
+ * to carry node topology. Values arrive from `<input>` elements as
+ * strings (or as numbers when the client manages the state itself), so
+ * each value is coerced against the type of the value already sitting on
+ * the node:
+ *
+ *   - existing number → Number(override), rejected when NaN
+ *   - existing boolean → 'true'/'false'/'1'/'0' → boolean
+ *   - existing string  → String(override)
+ *   - input absent     → written as-is (the workflow author added it)
+ *
+ * Call this AFTER `injectPromptIntoWorkflow`: the injector rewrites every
+ * sampler's seed to a fresh random value, so a user-pinned seed has to be
+ * applied last to win. This ordering also lets a user override `text` on
+ * a prompt node, which is why we don't filter by class here.
+ */
+export function applyWorkflowOverrides(
+  workflow: ApiWorkflow,
+  overrides: Record<string, unknown> | undefined,
+): WorkflowOverrideResult {
+  const result: WorkflowOverrideResult = { applied: [], skipped: [] }
+  if (overrides === undefined) return result
+  for (const [key, raw] of Object.entries(overrides)) {
+    // Split on the FIRST colon only: ComfyUI node ids are opaque strings
+    // that can themselves contain colons (custom nodes use things like
+    // `3:1` for subgraphs), while input names never do.
+    const separator = key.indexOf(':')
+    if (separator <= 0 || separator === key.length - 1) {
+      result.skipped.push({ key, reason: 'malformed-key' })
+      continue
+    }
+    const nodeId = key.slice(0, separator)
+    const inputName = key.slice(separator + 1)
+    const node = workflow[nodeId]
+    if (node === undefined || node === null || typeof node !== 'object') {
+      result.skipped.push({ key, reason: 'node-not-found' })
+      continue
+    }
+    if (node.inputs === undefined) node.inputs = {}
+    const previous = node.inputs[inputName]
+    const coerced = coerceOverride(raw, previous)
+    if (coerced === INVALID_OVERRIDE) {
+      result.skipped.push({ key, reason: 'invalid-value' })
+      continue
+    }
+    node.inputs[inputName] = coerced
+    result.applied.push({ nodeId, inputName, value: coerced, previous })
+    // A pinned `seed` also has to land on `noise_seed` when the node has
+    // one: the injector wrote a random value there, and samplers that read
+    // `noise_seed` (SamplerCustomAdvanced / RandomNoise / a refiner stage)
+    // would otherwise ignore the user's pin.
+    if (inputName === 'seed' && node.inputs['noise_seed'] !== undefined && typeof coerced === 'number') {
+      node.inputs['noise_seed'] = coerced
+    }
+  }
+  return result
+}
+
+/** Sentinel for "the override could not be coerced to the target type".
+ *  A unique symbol so a legitimate `undefined` can never collide. */
+const INVALID_OVERRIDE = Symbol('invalid-override')
+
+/** Coerce a canvas-supplied override to match the type already on the node.
+ *  When there is no previous value we trust the caller (round 4.3 only
+ *  renders fields the inspector already found, so this is the rare path). */
+function coerceOverride(raw: unknown, previous: unknown): unknown {
+  if (raw === null || raw === undefined) return INVALID_OVERRIDE
+  if (typeof previous === 'number') {
+    const n = typeof raw === 'number' ? raw : Number(String(raw).trim())
+    return Number.isFinite(n) ? n : INVALID_OVERRIDE
+  }
+  if (typeof previous === 'boolean') {
+    if (typeof raw === 'boolean') return raw
+    const text = String(raw).trim().toLowerCase()
+    if (text === 'true' || text === '1') return true
+    if (text === 'false' || text === '0') return false
+    return INVALID_OVERRIDE
+  }
+  if (typeof previous === 'string') return String(raw)
+  // No previous value to learn the type from: pass it through, but reject
+  // objects/arrays so a malformed client can't inject a graph fragment.
+  if (typeof raw === 'object') return INVALID_OVERRIDE
+  return raw
+}

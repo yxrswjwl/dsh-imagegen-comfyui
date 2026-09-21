@@ -16,7 +16,7 @@ import type { WebRoute } from '@deepseek-ai/dsh-host-webserver'
 import type { ImageAttachmentRef, ImageMediaType, SaveImageAttachment } from '@deepseek-ai/dsh-attachment'
 import { SettingsConflictError, type SettingsDescriptor } from '@deepseek-ai/dsh-settings'
 import type { UpstreamConfig } from './engine.ts'
-import { fetchComfyUiWorkflow, UiFormatWorkflowError } from './comfyui-workflow-loader.ts'
+import { fetchComfyUiWorkflow, UiFormatWorkflowError, type ApiWorkflow } from './comfyui-workflow-loader.ts'
 import { inspectWorkflow } from './comfyui-workflow-inspect.ts'
 import { enhancePrompt, listImageModels, listPromptModels, type PromptModelConfig } from './prompt-enhancer.ts'
 import { analyzeLayers, MAX_LAYER_IMAGE_BYTES } from './layer-analyzer.ts'
@@ -2054,22 +2054,41 @@ export function makeRoutes(deps: ImageGenRoutesDeps): WebRoute[] {
         // `model` on the workflow metadata; reuse it for the run.
         const channelId = metadata.channelId
         const modelAlias = metadata.model
+        // Round 4.3: the canvas node owns a `${nodeId}:${inputName}` map of
+        // widget overrides plus a run multiplier. Both are re-validated
+        // here (the canvas document is just JSON on disk, not a trusted
+        // boundary) and handed to the engine, which writes them into the
+        // workflow right before submitting.
+        const overrides = plainRecordOf(metadata.advancedOverrides)
+        const runCount = clampRunCount(metadata.runCount)
+        // One budget for the whole run. ComfyUI's own poller has a 600 s
+        // deadline, but the *submission* fetch carries no timeout of its own,
+        // so a wedged local service could leave the canvas node spinning on
+        // "生成中" forever. Abort after the same 600 s window; whichever side
+        // trips first (poller deadline or this abort) surfaces as an error.
+        const controller = new AbortController()
+        const budget = setTimeout(() => {
+          controller.abort(new DOMException('生成超时', 'TimeoutError'))
+        }, 600_000)
+        budget.unref?.()
         try {
           const request: GenerateRequest = {
-            mode: 'image',
+            mode: 'text',
             model: modelAlias,
             prompt: textParts.join('\n\n'),
             size: 'auto',
             quality: 'auto',
-            n: 1,
+            n: runCount,
             detail: '',
-            canvasId,
-            workflowNodeId,
-            // Empty ref array — round 4.1 sends text-only; round 4.4 will
-            // hand image inputs through here.
-            refs: [],
+            // Canvas lineage: the history entry gets attributed to this
+            // canvas and back to the workflow node that triggered it.
+            canvas: { canvasId, sourceNodeId: workflowNodeId },
+            // Round 4.1 sends text only. Round 4.4 will fill `image` /
+            // `images` (data URLs) from image nodes wired into the
+            // workflow's image ports.
+            ...overrides === undefined ? {} : { overrides },
           }
-          const result = await runtime.run({ ...request, channelId })
+          const result = await runtime.run({ ...request, channelId }, controller.signal)
           const images = result.images
           if (images.length === 0) {
             writeJson(res, 200, { ok: false, code: 'no-output', message: 'ComfyUI 未返回任何图片' })
@@ -2081,9 +2100,41 @@ export function makeRoutes(deps: ImageGenRoutesDeps): WebRoute[] {
           const code = error instanceof Error && 'code' in error && typeof (error as { code?: unknown }).code === 'string'
             ? (error as { code: string }).code
             : 'run-failed'
-          writeJson(res, 200, { ok: false, code, message })
+          // A budget abort (or the engine translating it to 'cancelled')
+          // means the run never settled: tell the user why instead of
+          // letting "任务已取消" read like an explicit cancel.
+          const finalMessage = code === 'cancelled' && controller.signal.aborted
+            ? '生成超时（600 秒）：请检查 ComfyUI 是否卡住、队列是否积压'
+            : message
+          writeJson(res, 200, { ok: false, code, message: finalMessage })
+        } finally {
+          clearTimeout(budget)
         }
       },
     },
   ]
+}
+
+/** Narrow an untrusted `advancedOverrides` blob into a flat
+ *  `{ '<nodeId>:<inputName>': scalar }` map, dropping malformed entries.
+ *  Returns `undefined` when nothing usable survives so the caller can omit
+ *  the field entirely. */
+function plainRecordOf(raw: unknown): Record<string, unknown> | undefined {
+  if (raw === null || typeof raw !== 'object' || Array.isArray(raw)) return undefined
+  const entries = Object.entries(raw as Record<string, unknown>)
+    .filter(([key, value]) => {
+      if (key.trim() === '' || value === undefined || value === null) return false
+      // Reject nested structures: a widget value is always a scalar, and
+      // letting an object through would hand an arbitrary graph fragment
+      // to ComfyUI.
+      return typeof value !== 'object'
+    })
+  return entries.length === 0 ? undefined : Object.fromEntries(entries)
+}
+
+/** Clamp the canvas's run multiplier into the engine's 1-4 window. */
+function clampRunCount(raw: unknown): number {
+  const n = typeof raw === 'number' ? raw : Number(raw)
+  if (!Number.isFinite(n)) return 1
+  return Math.min(4, Math.max(1, Math.round(n)))
 }

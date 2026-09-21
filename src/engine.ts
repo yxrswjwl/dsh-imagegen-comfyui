@@ -11,7 +11,7 @@
 import type { GeneratedImage, GenerateRequest, GenerateResult } from './protocol.ts'
 import { detectImageMime } from './image-format.ts'
 import { modelFamily, promptCharLimit } from './model-catalog.ts'
-import { fetchComfyUiWorkflow, injectPromptIntoWorkflow, type ApiWorkflow, type InjectionSummary } from './comfyui-workflow-loader.ts'
+import { applyWorkflowOverrides, fetchComfyUiWorkflow, injectPromptIntoWorkflow, type ApiWorkflow, type InjectionSummary } from './comfyui-workflow-loader.ts'
 import { waitForComfyUiOutputs } from './comfyui-history.ts'
 
 /** The upstream credentials the panel's settings card configures. */
@@ -1027,10 +1027,26 @@ async function generateComfyUiImage(
   // to disk reads on HTTP 404 — see `comfyui-workflow-loader.ts`.
   const workflowTemplate = await fetchComfyUiWorkflow(upstream, workflowPath, { signal: options.signal, installDir: upstream.installDir })
   const count = clampCount(request.n)
+  // Round 4.3: the canvas can pin widget values (seed / steps / size /
+  // batch_size …) on a workflow node. They travel on the request rather
+  // than baking into the workflow file so one imported workflow can serve
+  // several canvas nodes with different settings.
+  const overrides = safeOverrides(request.overrides)
   const images = (await Promise.all(
-    Array.from({ length: count }, async () => runOneComfyUiWorkflow(baseUrl, upstream, workflowTemplate, request, options.signal)),
+    Array.from({ length: count }, async () => runOneComfyUiWorkflow(baseUrl, upstream, workflowTemplate, request, overrides, options.signal)),
   )).flat()
   return { images }
+}
+
+/** Narrow the loosely-typed `request.overrides` (it arrives over JSON) to a
+ *  plain string-keyed map, dropping anything that couldn't have come from
+ *  the canvas UI. Returns `undefined` when there is nothing to apply so the
+ *  loader can skip the work entirely. */
+function safeOverrides(raw: unknown): Record<string, unknown> | undefined {
+  if (raw === null || typeof raw !== 'object' || Array.isArray(raw)) return undefined
+  const entries = Object.entries(raw as Record<string, unknown>)
+    .filter(([key, value]) => key.trim() !== '' && value !== undefined && value !== null)
+  return entries.length === 0 ? undefined : Object.fromEntries(entries)
 }
 
 /** Run a single workflow with a fresh random seed and read its outputs. */
@@ -1039,6 +1055,7 @@ async function runOneComfyUiWorkflow(
   upstream: UpstreamConfig,
   workflowTemplate: ApiWorkflow,
   request: GenerateRequest,
+  overrides: Record<string, unknown> | undefined,
   signal?: AbortSignal,
 ): Promise<GeneratedImage[]> {
   // Deep-clone so the per-run injection does not leak seeds into siblings.
@@ -1046,6 +1063,18 @@ async function runOneComfyUiWorkflow(
   const summary: InjectionSummary = injectPromptIntoWorkflow(workflow, { positive: request.prompt })
   if (summary.positiveNodeId === null) {
     throw new ImageGenError('工作流里找不到 CLIPTextEncode 节点：请确认选的是 ComfyUI 文生图工作流（不是 API/参考图工作流）', 'comfyui-no-prompt-node')
+  }
+  // Overrides land *after* the injection on purpose: the injector rewrites
+  // every sampler seed to a fresh random value, so a user-pinned seed has
+  // to be written last to survive.
+  if (overrides !== undefined) {
+    const applied = applyWorkflowOverrides(workflow, overrides)
+    if (applied.skipped.length > 0) {
+      // Not fatal: a stale node id (the user re-imported the workflow) or a
+      // field the workflow no longer has should degrade to "generate with
+      // defaults" rather than blocking the click.
+      console.warn('[dsh-imagegen] Some workflow overrides were skipped:', applied.skipped)
+    }
   }
   const promptId = await submitComfyUiPrompt(baseUrl, upstream, workflow, signal)
   return await waitForComfyUiOutputs(baseUrl, upstream.apiKey, promptId, signal)

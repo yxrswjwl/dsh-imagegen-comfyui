@@ -3,7 +3,7 @@
  * data access path the panel uses — plain fetch, same origin.
  */
 
-import { CANVAS_API, CANVAS_SKILL_API, CONVERSATION_IMAGE_API, DATA_FOLDER_API, GALLERY_API, GENERATE_API, HISTORY_API, PROMPT_ENHANCE_API, STORAGE_API, TASK_API, TEMPLATE_FAVORITES_API, TEMPLATES_API, UPDATE_API, type CanvasAssetRef, type CanvasDocument, type CanvasFilePreview, type CanvasLayerPlan, type CanvasSkillCatalog, type CanvasSkillConfigApplyRequest, type CanvasSkillConfigApplyResult, type CanvasSkillConfigSaveRequest, type CanvasSkillConfigSaveResult, type CanvasSkillInstallRequest, type CanvasSkillInstallResult, type CanvasSkillLibrary, type CanvasSkillRemoveResult, type CanvasSkillRunRequest, type CanvasSkillTask, type CanvasSummary, type CanvasWorkflowNodeMeta, type GenerateRequest, type GenerateResult, type GenerationTask, type HistoryEntry, type HistoryEntryInput, type TemplateCase, type TemplateFavorite, type TemplateListResult, type TemplateRefreshResult, type TemplateSample, type UpdateInfo } from '../protocol.ts'
+import { CANVAS_API, CANVAS_SKILL_API, CONVERSATION_IMAGE_API, DATA_FOLDER_API, GALLERY_API, GENERATE_API, HISTORY_API, PROMPT_ENHANCE_API, STORAGE_API, TASK_API, TEMPLATE_FAVORITES_API, TEMPLATES_API, UPDATE_API, type CanvasAssetRef, type CanvasDocument, type CanvasFilePreview, type CanvasLayerPlan, type CanvasSkillCatalog, type CanvasSkillConfigApplyRequest, type CanvasSkillConfigApplyResult, type CanvasSkillConfigSaveRequest, type CanvasSkillConfigSaveResult, type CanvasSkillInstallRequest, type CanvasSkillInstallResult, type CanvasSkillLibrary, type CanvasSkillRemoveResult, type CanvasSkillRunRequest, type CanvasSkillTask, type CanvasSummary, type CanvasWorkflowNodeMeta, type GenerateRequest, type GenerateResult, type GeneratedImage, type GenerationTask, type HistoryEntry, type HistoryEntryInput, type TemplateCase, type TemplateFavorite, type TemplateListResult, type TemplateRefreshResult, type TemplateSample, type UpdateInfo } from '../protocol.ts'
 import { activeImageGenLanguage } from './helpers.ts'
 
 /** Error carrying the route's JSON error message. */
@@ -35,7 +35,7 @@ export type CanvasWorkflowInspectResult =
 
 /** Result envelope returned by `canvasRunWorkflow`. Round 4.1. */
 export type CanvasWorkflowRunResult =
-  | { ok: true; images: import('./protocol.ts').GeneratedImage[]; canvasId: string; workflowNodeId: string }
+  | { ok: true; images: GeneratedImage[]; canvasId: string; workflowNodeId: string }
   | { ok: false; code: string; message: string }
 
 /** Parse the { ok, ... } envelope or throw an ImageGenApiError. */
@@ -409,23 +409,41 @@ export class ImageGenApi {
 
   /** Run one workflow node: host collects connected text inputs, injects
    *  them into the workflow, submits to ComfyUI, and returns generated
-   *  images as inline `data:` URLs. Round 4.1. */
+   *  images as inline `data:` URLs. Round 4.1.
+   *
+   *  Round 4.4: one client-side budget so a wedged host (ComfyUI hung on
+   *  submission or polling) can never leave the canvas node on "生成中"
+   *  forever. The host aborts its own run at 600 s; this budget is a bit
+   *  longer so a normal failure still resolves as a structured `ok:false`
+   *  result while a genuinely dead host degrades to a timeout error. */
   async canvasRunWorkflow(canvasId: string, workflowNodeId: string): Promise<CanvasWorkflowRunResult> {
-    const response = await fetch(CANVAS_API.runWorkflow, {
-      method: 'POST',
-      headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ canvasId, workflowNodeId }),
-    })
-    let body: unknown
+    const controller = new AbortController()
+    const budget = setTimeout(() => controller.abort(new DOMException('The operation timed out.', 'TimeoutError')), 660_000)
     try {
-      body = await response.json()
-    } catch {
-      throw new ImageGenApiError(`HTTP ${response.status}: invalid JSON response`)
+      const response = await fetch(CANVAS_API.runWorkflow, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ canvasId, workflowNodeId }),
+        signal: controller.signal,
+      })
+      let body: unknown
+      try {
+        body = await response.json()
+      } catch {
+        throw new ImageGenApiError(`HTTP ${response.status}: invalid JSON response`)
+      }
+      if (body === null || typeof body !== 'object') {
+        throw new ImageGenApiError(`HTTP ${response.status}: malformed response`)
+      }
+      return body as CanvasWorkflowRunResult
+    } catch (error) {
+      if (controller.signal.aborted) {
+        throw new ImageGenApiError('生成超时：请检查 ComfyUI 是否卡住或队列积压')
+      }
+      throw error
+    } finally {
+      clearTimeout(budget)
     }
-    if (body === null || typeof body !== 'object') {
-      throw new ImageGenApiError(`HTTP ${response.status}: malformed response`)
-    }
-    return body as CanvasWorkflowRunResult
   }
 
   /** Fetch one template source's list (bundled snapshot or refreshed copy). */

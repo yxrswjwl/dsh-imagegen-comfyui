@@ -1113,6 +1113,138 @@
   background: color-mix(in srgb, var(--dsw-alias-brand-secondary, var(--dsw-alias-brand-primary)) 18%, transparent);
 }
 
+/* ------------------------------------------- workflow advanced accordion
+   Round 4.3. The header is a button (so the whole row toggles, not just
+   the caret); the body groups fields by ComfyUI node because an imported
+   workflow easily exposes 15+ widgets and a flat list is unreadable.
+   Every field starts empty and shows the workflow's own value as a
+   placeholder — empty means "the JSON file still decides". */
+.workflowAccordionHeader {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  width: 100%;
+  padding: 2px 0;
+  border: none;
+  background: none;
+  cursor: pointer;
+  font: inherit;
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  color: var(--dsw-alias-label-tertiary);
+  text-transform: uppercase;
+  text-align: left;
+}
+
+.workflowAccordionHeader:hover {
+  color: var(--dsw-alias-label-secondary);
+}
+
+.workflowAccordionCaret {
+  display: inline-block;
+  font-size: 9px;
+  line-height: 1;
+  transition: transform 120ms ease;
+}
+
+.workflowAccordionCaret[data-open='true'] {
+  transform: rotate(90deg);
+}
+
+.workflowOptionGroups {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding-top: 2px;
+}
+
+.workflowOptionGroup {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  padding: 6px 8px;
+  border-radius: 6px;
+  background: var(--dsw-alias-bg-layer-2);
+}
+
+.workflowOptionGroupHeader {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  font-size: 10px;
+  font-weight: 600;
+  color: var(--dsw-alias-label-tertiary);
+}
+
+.workflowOptionGroupId {
+  font-weight: 400;
+  opacity: 0.7;
+}
+
+.workflowOptionField {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 11px;
+  color: var(--dsw-alias-label-secondary);
+}
+
+/* A field the user has actually pinned gets a brand-coloured name so the
+   "which of these did I change?" question is answerable at a glance. */
+.workflowOptionField[data-overridden='true'] .workflowOptionName {
+  color: var(--dsw-alias-brand-primary);
+  font-weight: 600;
+}
+
+.workflowOptionName {
+  flex: 0 0 96px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.workflowOptionInput {
+  flex: 1 1 auto;
+  min-width: 0;
+  padding: 2px 6px;
+  border: 1px solid var(--dsw-alias-border-secondary, rgba(127, 127, 127, 0.3));
+  border-radius: 4px;
+  background: var(--dsw-alias-bg-layer-1, transparent);
+  color: var(--dsw-alias-label-primary);
+  font: inherit;
+  font-size: 11px;
+}
+
+.workflowOptionInput:focus {
+  outline: none;
+  border-color: var(--dsw-alias-brand-primary);
+}
+
+.workflowOptionCheckbox {
+  flex: 0 0 auto;
+  margin: 0;
+  accent-color: var(--dsw-alias-brand-primary);
+}
+
+.workflowOptionReset {
+  flex: 0 0 auto;
+  width: 16px;
+  height: 16px;
+  padding: 0;
+  border: none;
+  border-radius: 4px;
+  background: color-mix(in srgb, var(--dsw-alias-brand-primary) 14%, transparent);
+  color: var(--dsw-alias-brand-primary);
+  font-size: 11px;
+  line-height: 1;
+  cursor: pointer;
+}
+
+.workflowOptionReset:hover {
+  background: color-mix(in srgb, var(--dsw-alias-brand-primary) 26%, transparent);
+}
+
 /* ---------------------------------------------------- workflow input ports
    The left edge of a workflow node is a stack of named input ports, one
    per text/image slot the inspector found. `nodeAnchor` mirrors this
@@ -1212,6 +1344,48 @@
   line-height: 1.5;
   white-space: pre-wrap;
   word-break: break-word;
+}
+
+/* Round 4.4: the last run's error, rendered at the top of the node body
+   so a failed generation is visible on the canvas itself. */
+.workflowRunError {
+  display: flex;
+  align-items: flex-start;
+  gap: 6px;
+  padding: 8px 10px;
+  border-radius: 8px;
+  background: color-mix(in srgb, var(--dsw-alias-label-error) 14%, transparent);
+  border: 1px solid color-mix(in srgb, var(--dsw-alias-label-error) 45%, transparent);
+  color: var(--dsw-alias-label-error);
+  font-size: 11px;
+  line-height: 1.45;
+}
+
+.workflowRunErrorText {
+  flex: 1;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.workflowRunErrorDismiss {
+  flex: none;
+  width: 18px;
+  height: 18px;
+  display: grid;
+  place-items: center;
+  border: none;
+  border-radius: 5px;
+  background: transparent;
+  color: inherit;
+  font-size: 13px;
+  line-height: 1;
+  cursor: pointer;
+  opacity: 0.75;
+}
+
+.workflowRunErrorDismiss:hover {
+  background: color-mix(in srgb, var(--dsw-alias-label-error) 18%, transparent);
+  opacity: 1;
 }
 
 .workflowPending {
