@@ -14,7 +14,7 @@ const COMFY = 'http://127.0.0.1:8188'
 const template = JSON.parse(readFileSync(FIXTURE, 'utf8'))
 const workflow = JSON.parse(JSON.stringify(template))
 // Long run (100 steps) so there is time to interrupt it.
-const applied = applyWorkflowOverrides(workflow, { '70:steps': 100, '68:batch_size': 1 })
+const applied = applyWorkflowOverrides(workflow, { '70:steps': 400, '68:batch_size': 2 })
 if (applied.skipped.length > 0) throw new Error(`overrides skipped: ${JSON.stringify(applied.skipped)}`)
 
 const submit = await fetch(`${COMFY}/prompt`, {

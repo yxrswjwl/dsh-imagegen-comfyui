@@ -35,7 +35,7 @@ export type CanvasWorkflowInspectResult =
 
 /** Result envelope returned by `canvasRunWorkflow`. Round 4.1. */
 export type CanvasWorkflowRunResult =
-  | { ok: true; images: GeneratedImage[]; canvasId: string; workflowNodeId: string }
+  | { ok: true; images: GeneratedImage[]; canvasId: string; workflowNodeId: string; params?: Record<string, unknown> }
   | { ok: false; code: string; message: string }
 
 /** Parse the { ok, ... } envelope or throw an ImageGenApiError. */
@@ -443,6 +443,31 @@ export class ImageGenApi {
       throw error
     } finally {
       clearTimeout(budget)
+    }
+  }
+
+  /** Live ComfyUI progress for one workflow node's most recent run.
+   *  Round 4.6: the canvas polls this every ~800 ms while a run is in
+   *  flight and shows a percentage on the node's busy overlay. */
+  async canvasWorkflowProgress(workflowNodeId: string): Promise<{ ok: boolean; running: boolean; progress: number | null; node: string | null }> {
+    const response = await fetch(`${CANVAS_API.workflowProgress}?workflowNodeId=${encodeURIComponent(workflowNodeId)}`, {
+      method: 'GET',
+    })
+    let body: unknown
+    try {
+      body = await response.json()
+    } catch {
+      return { ok: false, running: false, progress: null, node: null }
+    }
+    if (body === null || typeof body !== 'object') {
+      return { ok: false, running: false, progress: null, node: null }
+    }
+    const record = body as { ok?: unknown; running?: unknown; progress?: unknown; node?: unknown }
+    return {
+      ok: record.ok === true,
+      running: record.running === true,
+      progress: typeof record.progress === 'number' ? record.progress : null,
+      node: typeof record.node === 'string' ? record.node : null,
     }
   }
 

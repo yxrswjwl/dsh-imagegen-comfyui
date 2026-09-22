@@ -1388,6 +1388,206 @@
   opacity: 1;
 }
 
+/* Round 4.6.1: live progress bar pinned above the workflow run button
+   while a generation is in flight. The bar tracks the WS-fed percentage
+   coming back from the host's polling loop (5–10 % granularity because
+   most samplers only emit 1–2 `progress` frames per second). */
+.workflowBusy {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 8px;
+  padding: 6px 8px;
+  border-radius: 8px;
+  background: color-mix(in srgb, var(--dsw-alias-accent-primary) 8%, transparent);
+  border: 1px solid color-mix(in srgb, var(--dsw-alias-accent-primary) 28%, transparent);
+  font-size: 12px;
+  color: var(--dsw-alias-text-primary);
+}
+
+.workflowBusySpinner {
+  flex: none;
+  width: 12px;
+  height: 12px;
+  border-radius: 50%;
+  border: 2px solid color-mix(in srgb, var(--dsw-alias-accent-primary) 28%, transparent);
+  border-top-color: var(--dsw-alias-accent-primary);
+  animation: workflow-busy-spin 0.8s linear infinite;
+}
+
+.workflowBusyLabel {
+  flex: none;
+  font-variant-numeric: tabular-nums;
+  letter-spacing: 0.02em;
+}
+
+.workflowBusyBar {
+  flex: 1;
+  height: 6px;
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--dsw-alias-accent-primary) 14%, transparent);
+  overflow: hidden;
+}
+
+.workflowBusyBarFill {
+  height: 100%;
+  background: var(--dsw-alias-accent-primary);
+  border-radius: inherit;
+  transition: width 0.2s ease;
+}
+
+@keyframes workflow-busy-spin {
+  to { transform: rotate(360deg); }
+}
+
+/* Round 4.6: provenance badge on image nodes produced by a workflow run.
+   Sits at the bottom edge of the image; the full source details live in
+   its title tooltip. */
+.workflowOriginBadge {
+  position: absolute;
+  left: 6px;
+  bottom: 6px;
+  max-width: calc(100% - 12px);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  padding: 2px 8px;
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--dsw-alias-background-elevated) 82%, transparent);
+  border: 1px solid color-mix(in srgb, var(--dsw-alias-border-l1) 70%, transparent);
+  color: var(--dsw-alias-label-secondary);
+  font-size: 10px;
+  line-height: 1.5;
+  font-family: inherit;
+  backdrop-filter: blur(4px);
+  pointer-events: auto;
+  cursor: pointer;
+  z-index: 2;
+}
+.workflowOriginBadge:hover {
+  background: color-mix(in srgb, var(--dsw-alias-background-elevated) 95%, transparent);
+  border-color: color-mix(in srgb, var(--dsw-alias-brand-primary) 45%, transparent);
+  color: var(--dsw-alias-label-primary);
+}
+
+/* Round 4.6.1: detail popover (prompt + final params + copy). Anchored
+   to the screen position of the click on the badge; sits inside the
+   `data-canvas-no-zoom` family so the canvas wheel/pan handlers ignore
+   it. */
+.workflowOriginPopover {
+  position: absolute;
+  width: 360px;
+  max-width: 80vw;
+  max-height: 70vh;
+  overflow-y: auto;
+  padding: 12px;
+  border-radius: 10px;
+  background: color-mix(in srgb, var(--dsw-alias-background-elevated) 95%, transparent);
+  border: 1px solid var(--dsw-alias-border-l1);
+  box-shadow: 0 8px 32px rgba(0, 0, 0, 0.35);
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  z-index: 5;
+  backdrop-filter: blur(8px);
+}
+.workflowOriginPopoverHeader {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  cursor: grab;
+  user-select: none;
+  -webkit-user-select: none;
+}
+.workflowOriginPopoverHeader:active {
+  cursor: grabbing;
+}
+.workflowOriginPopoverTitle {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--dsw-alias-label-primary);
+  word-break: break-all;
+}
+.workflowOriginClose {
+  flex: none;
+  width: 20px;
+  height: 20px;
+  display: grid;
+  place-items: center;
+  border: none;
+  border-radius: 5px;
+  background: transparent;
+  color: var(--dsw-alias-label-secondary);
+  font-size: 14px;
+  line-height: 1;
+  cursor: pointer;
+}
+.workflowOriginClose:hover {
+  background: color-mix(in srgb, var(--dsw-alias-label-primary) 12%, transparent);
+}
+.workflowOriginSection {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.workflowOriginSectionHeader {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--dsw-alias-label-tertiary);
+}
+.workflowOriginCopyBtn {
+  border: 1px solid var(--dsw-alias-border-l1);
+  border-radius: 5px;
+  padding: 2px 8px;
+  background: transparent;
+  color: var(--dsw-alias-label-secondary);
+  font-size: 10px;
+  line-height: 1.4;
+  cursor: pointer;
+}
+.workflowOriginCopyBtn:hover {
+  background: color-mix(in srgb, var(--dsw-alias-label-primary) 8%, transparent);
+  color: var(--dsw-alias-label-primary);
+}
+.workflowOriginPrompt,
+.workflowOriginParams {
+  margin: 0;
+  padding: 8px 10px;
+  border-radius: 6px;
+  background: color-mix(in srgb, var(--dsw-alias-background-base) 80%, transparent);
+  border: 1px solid color-mix(in srgb, var(--dsw-alias-border-l1) 50%, transparent);
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 11px;
+  line-height: 1.5;
+  color: var(--dsw-alias-label-primary);
+  white-space: pre-wrap;
+  word-break: break-word;
+  max-height: 240px;
+  overflow-y: auto;
+  user-select: text;
+}
+.workflowOriginEmpty {
+  font-size: 11px;
+  color: var(--dsw-alias-label-tertiary);
+  font-style: italic;
+}
+.workflowOriginFooter {
+  display: flex;
+  justify-content: space-between;
+  gap: 8px;
+  font-size: 10px;
+  color: var(--dsw-alias-label-tertiary);
+  border-top: 1px solid color-mix(in srgb, var(--dsw-alias-border-l1) 50%, transparent);
+  padding-top: 8px;
+}
+
 .workflowPending {
   display: flex;
   align-items: center;

@@ -161,6 +161,11 @@ export const CANVAS_API = {
    *  into the workflow JSON, submits to ComfyUI, and returns a task id the
    *  client can poll for status / outputs. Round 4 entry point. */
   runWorkflow: '/api/dsh-imagegen/canvas/workflow/run',
+  /** Live ComfyUI progress for one workflow node's most recent run
+   *  (`?workflowNodeId=…`). Returns `{ ok, running, progress, node }`.
+   *  Round 4.6: the canvas polls this while a run is in flight so the
+   *  node can show a percentage instead of an indefinite spinner. */
+  workflowProgress: '/api/dsh-imagegen/canvas/workflow/progress',
 } as const
 
 /** Same-origin route family for canvas skills (catalog + run control). */
@@ -801,6 +806,24 @@ export interface CanvasNodeMetadata {
   fileKind?: CanvasFileKind
   /** Skill-produced nodes: which skill produced this and from what. */
   skill?: CanvasSkillProvenance
+  /** Image nodes produced by a workflow run: the workflow + settings that
+   *  generated them, so a result stays traceable to its source node
+   *  (round 4.6). Rendered as a small badge on the image node. */
+  workflowOrigin?: {
+    /** Workflow file name (`image_z_image_turbo.json`). */
+    workflowName: string
+    /** The prompt text that was injected (kept verbatim for copy-out). */
+    prompt: string
+    /** Widget overrides snapshot (already scalar; kept verbatim). */
+    overrides: Record<string, unknown>
+    /** FINAL widget values as submitted (random seed, steps, cfg, size…),
+     *  keyed `${nodeId}:${inputName}` (round 4.6.1). */
+    params: Record<string, unknown>
+    /** Run multiplier used (1-4). */
+    runCount: number
+    /** Epoch ms of the run. */
+    at: number
+  }
   /** Workflow nodes: the ComfyUI workflow this node drives. The
    *  `inspection` snapshot is taken at creation time and re-fetched
    *  when `model` / `channelId` change; the canvas UI renders the
@@ -1061,6 +1084,11 @@ export interface GenerateResult {
   history?: HistoryEntry[]
   /** Persistence failure after images were successfully generated. */
   historyError?: string
+  /** ComfyUI-only: prompt ids of the runs just submitted, so the host can
+   *  correlate live WS progress with the canvas node that triggered them.
+   *  `params` is the final widget snapshot of the first sub-run (seed /
+   *  steps / cfg / size / … as actually submitted). */
+  comfy?: { promptIds: string[]; params?: Record<string, unknown> }
 }
 
 /**

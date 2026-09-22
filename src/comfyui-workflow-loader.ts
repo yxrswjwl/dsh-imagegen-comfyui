@@ -632,3 +632,51 @@ function comfyImageExtension(mime: string): string {
   if (mime === 'image/bmp') return 'bmp'
   return 'png'
 }
+
+/* ------------------------------------------------------------------------- */
+/*  Final-parameter snapshot (round 4.6.1)                                   */
+/* ------------------------------------------------------------------------- */
+
+/** Widget names worth keeping in the result provenance, keyed by
+ *  `${nodeId}:${inputName}`. The canvas stores these on every generated
+ *  image so the actual seed / steps / cfg / size used can be reviewed and
+ *  copied after the fact. */
+const SNAPSHOT_WIDGET_NAMES = new Set([
+  'seed',
+  'noise_seed',
+  'steps',
+  'cfg',
+  'sampler_name',
+  'scheduler',
+  'denoise',
+  'width',
+  'height',
+  'batch_size',
+  'shift',
+  'clip_skip',
+  'start_percent',
+  'end_percent',
+  'strength',
+  'highres_scale',
+  'highres_denoise',
+  'control_after_generate',
+])
+
+/** Snapshot the FINAL widget values of a workflow right before submission —
+ *  after prompt injection, overrides, and image wiring — so provenance
+ *  carries the values that were actually used (including the random seed
+ *  the injector wrote, which never appears in `advancedOverrides`).
+ *  Scalar values only, keyed `${nodeId}:${inputName}`. */
+export function snapshotWorkflowParams(workflow: ApiWorkflow): Record<string, unknown> {
+  const out: Record<string, unknown> = {}
+  for (const [id, node] of Object.entries(workflow)) {
+    if (node.inputs === undefined) continue
+    for (const [name, value] of Object.entries(node.inputs)) {
+      if (!SNAPSHOT_WIDGET_NAMES.has(name)) continue
+      if (typeof value !== 'number' && typeof value !== 'string' && typeof value !== 'boolean') continue
+      const key = `${id}:${name}`
+      if (!(key in out)) out[key] = value
+    }
+  }
+  return out
+}

@@ -1224,6 +1224,14 @@ export function CanvasWorkspace(props: CanvasWorkspaceProps): React.JSX.Element 
   /** Two-step workflow picker: the create-menu lands here first; the user
    *  picks (channel, model), then we close it and call createWorkflowNode. */
   const [workflowPicker, setWorkflowPicker] = useState<{ screen: Point; world: Point; channelId?: string } | null>(null)
+  /** Detail popover for an image node produced by a workflow run
+   *  (prompt + final params + copy buttons). Null = closed. */
+  const [workflowOriginView, setWorkflowOriginView] = useState<{ nodeId: string; anchor: Point; origin: NonNullable<NonNullable<CanvasNode['metadata']>['workflowOrigin']> } | null>(null)
+  /** Live offset applied on top of the anchor: starts at the anchor and
+   *  shifts as the user drags the header bar around. */
+  const [popoverPosition, setPopoverPosition] = useState<Point | null>(null)
+  const workflowOriginPopoverRef = useRef<HTMLDivElement>(null)
+  const popoverDragRef = useRef<{ pointerId: number; offset: Point; base: Point } | null>(null)
   const [minimapOpen, setMinimapOpen] = useState(true)
   const [pickerOpen, setPickerOpen] = useState(false)
   const [backgroundMenu, setBackgroundMenu] = useState<Point | null>(null)
@@ -1378,7 +1386,11 @@ export function CanvasWorkspace(props: CanvasWorkspaceProps): React.JSX.Element 
   // 图层拆分 (vision layer plan -> editable nodes).
   const [annotateNodeId, setAnnotateNodeId] = useState<string | null>(null)
   const [annotationDraft, setAnnotationDraft] = useState<{ nodeId: string; rect: CanvasRect } | null>(null)
-  const [busyNodes, setBusyNodes] = useState<Record<string, string>>({})
+  /** Per-node busy state. The string `label` carries the static copy
+   *  ("生成中…" / "润色中…"), and `progress` (0–100 or `null`) lets the
+   *  workflow node render a live progress bar fed by the polling loop. */
+  interface NodeBusyState { label: string; progress: number | null }
+  const [busyNodes, setBusyNodes] = useState<Record<string, NodeBusyState>>({})
   const [focusNodeId, setFocusNodeId] = useState<string | null>(null)
   const [colorPickerNodeId, setColorPickerNodeId] = useState<string | null>(null)
   const annotationDragRef = useRef<{ nodeId: string; pointerId: number; start: Point; box: { left: number; top: number; width: number; height: number } } | null>(null)
@@ -1791,8 +1803,27 @@ export function CanvasWorkspace(props: CanvasWorkspaceProps): React.JSX.Element 
   const runWorkflow = useCallback(async (node: CanvasNode): Promise<void> => {
     const current = documentRef.current
     if (current === null) return
-    const runLabel = tt('canvas.workflowRunButton')
-    setBusyNodes(previous => ({ ...previous, [node.id]: runLabel }))
+    const runningLabel = tt('canvas.workflowRunRunning')
+    setBusyNodes(previous => ({ ...previous, [node.id]: { label: runningLabel, progress: null } }))
+    // Round 4.6: poll live ComfyUI progress while the run is in flight so
+    // the node shows "生成中… 45%" instead of an indefinite spinner. The
+    // polling is best-effort: any failure just leaves the plain label.
+    let progressTimer: number | null = null
+    const pollProgress = async (): Promise<void> => {
+      try {
+        const snapshot = await api.canvasWorkflowProgress(node.id)
+        if (snapshot.running && snapshot.progress !== null) {
+          setBusyNodes(previous => {
+            if (previous[node.id] === undefined) return previous
+            return { ...previous, [node.id]: { label: `${runningLabel} ${snapshot.progress}%`, progress: snapshot.progress } }
+          })
+        }
+      } catch {
+        // ignore polling failures (host restart, socket down, …)
+      }
+    }
+    progressTimer = window.setInterval(() => { void pollProgress() }, 500)
+    void pollProgress()
     try {
       // The host reads the canvas document from disk, so flush the current
       // one first — otherwise a widget override the user just typed (the
@@ -1808,6 +1839,27 @@ export function CanvasWorkspace(props: CanvasWorkspaceProps): React.JSX.Element 
       }
       patchWorkflowMeta(node.id, { lastRunError: undefined, lastRunAt: Date.now() })
       if (result.images.length === 0) return
+      // Round 4.6: snapshot the source workflow + settings on every result
+      // node so a generated image stays traceable (badge + detail popover).
+      const wfMeta = nodeMetadata(node).workflow
+      const originPrompt = current.connections
+        .filter(connection => connection.toNodeId === node.id)
+        .map(connection => current.nodes.find(candidate => candidate.id === connection.fromNodeId))
+        .filter((candidate): candidate is CanvasNode => candidate?.type === 'text')
+        .map(candidate => (candidate.metadata?.text ?? '').trim())
+        .filter(text => text !== '')
+        .join('\n\n')
+      const workflowOrigin = wfMeta === undefined ? undefined : {
+        workflowName: wfMeta.workflowName,
+        prompt: originPrompt,
+        overrides: { ...(wfMeta.advancedOverrides ?? {}) },
+        // Round 4.6.1: the host returns the FINAL widget values as
+        // submitted (random seed included) — provenance must show what
+        // actually ran, not just what the user typed.
+        params: result.params ?? {},
+        runCount: wfMeta.runCount ?? 1,
+        at: Date.now(),
+      }
       // Materialise each generated image as an asset and place an image
       // node to the right of the workflow node, snapped vertically.
       const baseX = node.x + node.width + 90
@@ -1819,6 +1871,7 @@ export function CanvasWorkspace(props: CanvasWorkspaceProps): React.JSX.Element 
         const asset = await api.canvasUpload(dataUrl, dimensions.width, dimensions.height, { origin: 'history' })
         const imageNode = createImageNode(asset, { x: baseX + index * (IMAGE_NODE_SIZE.width + 60), y: baseY + index * 40 })
         imageNode.title = `${node.title} #${index + 1}`
+        imageNode.metadata = { ...imageNode.metadata, ...(workflowOrigin === undefined ? {} : { workflowOrigin }) }
         mutate(previous => ({ ...previous, nodes: [...previous.nodes, imageNode], connections: [...previous.connections, { id: newId('edge'), fromNodeId: node.id, toNodeId: imageNode.id }] }))
       }
       setNotice(tt('canvas.workflowRunComplete', { count: result.images.length }))
@@ -1827,6 +1880,7 @@ export function CanvasWorkspace(props: CanvasWorkspaceProps): React.JSX.Element 
       setError(message)
       patchWorkflowMeta(node.id, { lastRunError: message, lastRunAt: Date.now() })
     } finally {
+      if (progressTimer !== null) { window.clearInterval(progressTimer); progressTimer = null }
       setBusyNodes(previous => {
         const next = { ...previous }
         delete next[node.id]
@@ -2376,7 +2430,7 @@ export function CanvasWorkspace(props: CanvasWorkspaceProps): React.JSX.Element 
     const current = documentRef.current
     if (current === null) return
     setPolishBusy(node.id)
-    setBusyNodes(previous => ({ ...previous, [node.id]: tt('canvas.skills.polish') }))
+    setBusyNodes(previous => ({ ...previous, [node.id]: { label: tt('canvas.skills.polish'), progress: null } }))
     try {
       const task = await api.canvasSkillRun({
         canvasId: current.id,
@@ -2632,7 +2686,7 @@ export function CanvasWorkspace(props: CanvasWorkspaceProps): React.JSX.Element 
 
   /** Run one long node-local operation while its toolbar shows a spinner. */
   const withNodeBusy = useCallback(async (nodeId: string, label: string, task: () => Promise<void>): Promise<void> => {
-    setBusyNodes(previous => ({ ...previous, [nodeId]: label }))
+    setBusyNodes(previous => ({ ...previous, [nodeId]: { label, progress: null } }))
     try {
       await task()
     } catch (caught) {
@@ -3286,6 +3340,84 @@ export function CanvasWorkspace(props: CanvasWorkspaceProps): React.JSX.Element 
     setFocusNodeId(null)
   }, [focusNodeId])
 
+  // When the workflow-origin popover opens, reset the drag offset so it
+  // first renders at the badge's anchor (bottom-left), then clamp into
+  // the visible viewport so it never falls off the right/bottom edge.
+  useEffect(() => {
+    if (workflowOriginView === null) {
+      setPopoverPosition(null)
+      return
+    }
+    setPopoverPosition(workflowOriginView.anchor)
+    const id = window.requestAnimationFrame(() => {
+      const popover = workflowOriginPopoverRef.current
+      const bounds = viewportRef.current?.getBoundingClientRect()
+      if (popover === null || bounds === undefined) return
+      const rect = popover.getBoundingClientRect()
+      const padding = 8
+      const overflowRight = (rect.left + rect.width) - (bounds.left + bounds.width) + padding
+      const overflowBottom = (rect.top + rect.height) - (bounds.top + bounds.height) + padding
+      const dx = overflowRight > 0 ? -overflowRight : 0
+      const dy = overflowBottom > 0 ? -overflowBottom : 0
+      if (dx !== 0 || dy !== 0) {
+        setPopoverPosition(previous => previous === null ? null : { x: previous.x + dx, y: previous.y + dy })
+      }
+    })
+    return () => window.cancelAnimationFrame(id)
+  }, [workflowOriginView])
+
+  // Drag the workflow-origin popover by its header. We translate the
+  // pointer delta into a position update on the popover; bounds clamping
+  // happens in the layout effect above whenever the position changes.
+  const beginPopoverDrag = (event: React.PointerEvent<HTMLDivElement>): void => {
+    if (workflowOriginView === null) return
+    if (popoverPosition === null) return
+    // Only the header area should start a drag — children that want
+    // clickable behavior (copy buttons, close ×) stopPropagation in
+    // their own handlers.
+    if (event.button !== 0) return
+    popoverDragRef.current = {
+      pointerId: event.pointerId,
+      offset: { x: event.clientX, y: event.clientY },
+      base: popoverPosition,
+    }
+    try { (event.target as Element).setPointerCapture(event.pointerId) } catch { /* ignored */ }
+  }
+  useEffect(() => {
+    if (workflowOriginView === null) return
+    const onMove = (event: PointerEvent): void => {
+      const drag = popoverDragRef.current
+      if (drag === null || event.pointerId !== drag.pointerId) return
+      const bounds = viewportRef.current?.getBoundingClientRect()
+      const popover = workflowOriginPopoverRef.current
+      if (bounds === undefined || popover === null) return
+      const dx = event.clientX - drag.offset.x
+      const dy = event.clientY - drag.offset.y
+      const next: Point = { x: drag.base.x + dx, y: drag.base.y + dy }
+      const rect = popover.getBoundingClientRect()
+      const minLeft = bounds.left - (rect.left - bounds.left - next.x)
+      const minTop = bounds.top
+      // keep at least 32px of the header on screen at any edge
+      next.x = Math.max(bounds.left + 32 - rect.width, Math.min(bounds.right - 32, next.x))
+      next.y = Math.max(minTop + 8, Math.min(bounds.bottom - 32, next.y))
+      setPopoverPosition(next)
+    }
+    const onUp = (event: PointerEvent): void => {
+      const drag = popoverDragRef.current
+      if (drag === null || event.pointerId !== drag.pointerId) return
+      popoverDragRef.current = null
+      try { (event.target as Element).releasePointerCapture?.(event.pointerId) } catch { /* ignored */ }
+    }
+    window.addEventListener('pointermove', onMove)
+    window.addEventListener('pointerup', onUp)
+    window.addEventListener('pointercancel', onUp)
+    return () => {
+      window.removeEventListener('pointermove', onMove)
+      window.removeEventListener('pointerup', onUp)
+      window.removeEventListener('pointercancel', onUp)
+    }
+  }, [workflowOriginView])
+
   // ------------------------------------------------------------ keyboard
 
   useEffect(() => {
@@ -3308,6 +3440,7 @@ export function CanvasWorkspace(props: CanvasWorkspaceProps): React.JSX.Element 
       const mod = event.ctrlKey || event.metaKey
       if (event.key === 'Escape') {
         setContextMenu(null); setCreateMenu(null); setBackgroundMenu(null); setImageMenu(null); setNodeAddMenu(null)
+        setWorkflowOriginView(null)
         setColorPickerNodeId(null)
         // Esc leaves the 标注 tool first, then clears the selection.
         if (annotateNodeId !== null) { setAnnotateNodeId(null); setAnnotationDraft(null); return }
@@ -3403,6 +3536,7 @@ export function CanvasWorkspace(props: CanvasWorkspaceProps): React.JSX.Element 
   const onViewportPointerDown = (event: ReactPointerEvent<HTMLDivElement>): void => {
     const target = event.target instanceof Element ? event.target : null
     setContextMenu(null); setCreateMenu(null); setNodeAddMenu(null)
+    setWorkflowOriginView(null)
     if (!target?.closest('[data-canvas-no-zoom]')) { setBackgroundMenu(null); setImageMenu(null) }
     const isBackground = target?.closest('[data-node-id],[data-connection-hit]') === null
     const shouldPan = event.button === 1 || (event.button === 0 && (tool === 'pan' || temporaryPanTool) && isBackground)
@@ -3837,6 +3971,19 @@ export function CanvasWorkspace(props: CanvasWorkspaceProps): React.JSX.Element 
 
   // ------------------------------------------------------------- render
 
+  /** Tooltip text for a workflow-origin badge on an image node: which
+   *  workflow + settings produced this result (round 4.6). */
+  const workflowOriginTooltip = (origin: NonNullable<NonNullable<CanvasNode['metadata']>['workflowOrigin']>): string => {
+    const params = Object.entries(origin.overrides)
+      .map(([key, value]) => `${key}=${String(value)}`)
+      .join(', ')
+    const lines = [`${tt('canvas.workflowOriginLabel')}：${origin.workflowName}`]
+    if (origin.prompt !== '') lines.push(`${tt('canvas.workflowOriginPrompt')}：${origin.prompt}`)
+    if (params !== '') lines.push(`${tt('canvas.workflowOriginParams')}：${params}`)
+    lines.push(`${tt('canvas.workflowRunCount')}：${origin.runCount}`)
+    return lines.join('\n')
+  }
+
   /** Body of a workflow node. Round 2 only renders the inspection result;
    *  round 3 will add port connectors (the `textSlots` and `imageSlots`
    *  arrays the scanner returned), and round 4 the advanced-options
@@ -4033,7 +4180,22 @@ export function CanvasWorkspace(props: CanvasWorkspaceProps): React.JSX.Element 
       </div>)
     }
     if (workflow.status === 'ok') {
-      const isRunning = busyNodes[node.id] === tt('canvas.workflowRunButton')
+      // Round 4.6: the busy label now carries a live percentage
+      // ("生成中… 45%"), so "in the busy set" is the running test rather
+      // than comparing against the static run-button copy.
+      const busy = busyNodes[node.id]
+      const isRunning = busy !== undefined
+      if (isRunning) {
+        const progress = busy.progress
+        const widthPct = progress === null ? 0 : Math.max(0, Math.min(100, progress))
+        sections.push(<div key="busy" className={css.workflowBusy} data-canvas-no-zoom="">
+          <span className={css.workflowBusySpinner} aria-hidden="true" />
+          <span className={css.workflowBusyLabel}>{busy.label}</span>
+          <div className={css.workflowBusyBar} aria-hidden="true">
+            <div className={css.workflowBusyBarFill} style={{ width: `${widthPct}%` }} />
+          </div>
+        </div>)
+      }
       sections.push(<button
         key="run"
         type="button"
@@ -4073,7 +4235,8 @@ export function CanvasWorkspace(props: CanvasWorkspaceProps): React.JSX.Element 
     const isTextual = node.type === 'text' || isConfig
     const isTextNode = node.type === 'text'
     const annotating = annotateNodeId === node.id && hasImage && !isSketch
-    const busyLabel = busyNodes[node.id]
+    const busy = busyNodes[node.id]
+    const busyLabel = busy?.label
     const annotations = node.type === 'image' ? liveAnnotations(node, document?.nodes ?? []) : []
     const draftRect = annotationDraft !== null && annotationDraft.nodeId === node.id ? annotationDraft.rect : null
     const boxStyle = (rect: CanvasRect): CSSProperties => ({
@@ -4197,6 +4360,29 @@ export function CanvasWorkspace(props: CanvasWorkspaceProps): React.JSX.Element 
                 : hasImage
                   ? <img src={asset.url} alt={node.title} draggable={false} onDragStart={event => event.preventDefault()} />
                   : <button type="button" className={css.nodeEmpty} onClick={() => imageFileRef.current?.click()}><ToolbarIcon name="image" /><span>{tt('canvas.emptyImageNode')}</span></button>}
+            {hasImage && metadata.workflowOrigin !== undefined ? <button
+              type="button"
+              className={css.workflowOriginBadge}
+              data-canvas-no-zoom=""
+              title={tt('canvas.workflowOriginOpen')}
+              onPointerDown={event => event.stopPropagation()}
+              onClick={event => {
+                event.stopPropagation()
+                // Anchor the popover near the badge rather than the raw
+                // pointer location: viewport-relative coordinates so the
+                // popover can lay out independent of where the click
+                // landed (the old behaviour placed the popover right
+                // under the cursor, which fell off-screen for badges
+                // near the viewport edge).
+                const target = event.currentTarget instanceof Element ? event.currentTarget : null
+                const rect = target?.getBoundingClientRect() ?? null
+                const bounds = viewportRef.current?.getBoundingClientRect() ?? null
+                const anchor: Point = rect !== null && bounds !== null
+                  ? { x: rect.left - bounds.left, y: rect.bottom - bounds.top }
+                  : { x: event.clientX, y: event.clientY }
+                setWorkflowOriginView({ nodeId: node.id, anchor, origin: metadata.workflowOrigin! })
+              }}
+            >{metadata.workflowOrigin.workflowName}</button> : null}
             {hasImage && annotations.length > 0 ? <div className={css.annotationLayer} aria-hidden="true">
               {annotations.map((annotation, index) => <div key={annotation.id} className={css.annotationBox} style={boxStyle(annotation)}>
                 <span className={css.annotationBadge}>{index + 1}</span>
@@ -4684,6 +4870,76 @@ export function CanvasWorkspace(props: CanvasWorkspaceProps): React.JSX.Element 
         >
           <ToolbarIcon name="upload" size={16} />{tt('canvas.workflowImportJson')}
         </button>
+      </div>
+    }
+    if (workflowOriginView !== null) {
+      const origin = workflowOriginView.origin
+      const paramEntries = Object.entries(origin.params)
+      const paramLines = paramEntries.map(([key, value]) => {
+        const inputName = key.includes(':') ? key.slice(key.indexOf(':') + 1) : key
+        return `${localizeWidgetName(inputName)}=${String(value)}`
+      })
+      const copyPrompt = async (): Promise<void> => {
+        try { await navigator.clipboard.writeText(origin.prompt) } catch { /* clipboard denied */ }
+      }
+      const copyAll = async (): Promise<void> => {
+        const text = [
+          `${tt('canvas.workflowOriginLabel')}：${origin.workflowName}`,
+          origin.prompt !== '' ? `${tt('canvas.workflowOriginPrompt')}：\n${origin.prompt}` : '',
+          paramLines.length > 0 ? `${tt('canvas.workflowOriginParams')}：\n${paramLines.join('\n')}` : '',
+          `${tt('canvas.workflowRunCount')}：${origin.runCount}`,
+        ].filter(line => line !== '').join('\n\n')
+        try { await navigator.clipboard.writeText(text) } catch { /* clipboard denied */ }
+      }
+      // Anchor: badge's bottom-left in viewport-relative coordinates
+      // (the badge button stores its own rect on click). We translate it
+      // to the popover's `style.left/top` via `position: absolute` so it
+      // tracks pan/zoom of the canvas. The popover auto-clamps inside
+      // the visible viewport in a layout effect below.
+      const popoverPos = popoverPosition ?? workflowOriginView.anchor
+      return <div
+        ref={workflowOriginPopoverRef}
+        className={css.workflowOriginPopover}
+        style={{ left: popoverPos.x, top: popoverPos.y }}
+        data-canvas-no-zoom=""
+        onPointerDown={event => event.stopPropagation()}
+        role="dialog"
+        aria-label={tt('canvas.workflowOriginLabel')}
+      >
+        <div
+          className={css.workflowOriginPopoverHeader}
+          onPointerDown={event => beginPopoverDrag(event)}
+        >
+          <span className={css.workflowOriginPopoverTitle}>{tt('canvas.workflowOriginLabel')}：{origin.workflowName}</span>
+          <button
+            type="button"
+            className={css.workflowOriginClose}
+            title={tt('canvas.dismiss')}
+            aria-label={tt('canvas.dismiss')}
+            onClick={() => setWorkflowOriginView(null)}
+            onPointerDown={event => event.stopPropagation()}
+          >×</button>
+        </div>
+        <div className={css.workflowOriginSection}>
+          <div className={css.workflowOriginSectionHeader}>
+            <span>{tt('canvas.workflowOriginPrompt')}</span>
+            <button type="button" className={css.workflowOriginCopyBtn} onClick={() => { void copyPrompt() }}>{tt('canvas.workflowOriginCopyPrompt')}</button>
+          </div>
+          {origin.prompt !== ''
+            ? <pre className={css.workflowOriginPrompt}>{origin.prompt}</pre>
+            : <div className={css.workflowOriginEmpty}>{tt('canvas.workflowOriginEmptyPrompt')}</div>}
+        </div>
+        {paramLines.length > 0 ? <div className={css.workflowOriginSection}>
+          <div className={css.workflowOriginSectionHeader}>
+            <span>{tt('canvas.workflowOriginParams')}</span>
+            <button type="button" className={css.workflowOriginCopyBtn} onClick={() => { void copyAll() }}>{tt('canvas.workflowOriginCopyAll')}</button>
+          </div>
+          <pre className={css.workflowOriginParams}>{paramLines.join('\n')}</pre>
+        </div> : null}
+        <div className={css.workflowOriginFooter}>
+          <span>{tt('canvas.workflowRunCount')}：{origin.runCount}</span>
+          <span>{tt('canvas.workflowOriginTime')}: {new Date(origin.at).toLocaleString()}</span>
+        </div>
       </div>
     }
     return null

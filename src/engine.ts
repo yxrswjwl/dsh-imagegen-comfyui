@@ -11,7 +11,7 @@
 import type { GeneratedImage, GenerateRequest, GenerateResult } from './protocol.ts'
 import { detectImageMime } from './image-format.ts'
 import { modelFamily, promptCharLimit } from './model-catalog.ts'
-import { applyImageFilesIntoWorkflow, applyWorkflowOverrides, fetchComfyUiWorkflow, injectPromptIntoWorkflow, uploadComfyUiImages, type ApiWorkflow, type ComfyUiImageUpload, type InjectionSummary } from './comfyui-workflow-loader.ts'
+import { applyImageFilesIntoWorkflow, applyWorkflowOverrides, fetchComfyUiWorkflow, injectPromptIntoWorkflow, snapshotWorkflowParams, uploadComfyUiImages, type ApiWorkflow, type ComfyUiImageUpload, type InjectionSummary } from './comfyui-workflow-loader.ts'
 import { waitForComfyUiOutputs } from './comfyui-history.ts'
 
 /** The upstream credentials the panel's settings card configures. */
@@ -967,7 +967,11 @@ async function generateMiniMaxImage(
  * parameter is never sent, because Responses-API-based gateways reject it as
  * `tools[0].n`), then the results are flattened in order.
  */
-export async function generateImage(upstream: UpstreamConfig, request: GenerateRequest, options: { signal?: AbortSignal } = {}): Promise<GenerateResult> {
+export async function generateImage(
+  upstream: UpstreamConfig,
+  request: GenerateRequest,
+  options: { signal?: AbortSignal; onComfyPrompt?: (promptId: string) => void } = {},
+): Promise<GenerateResult> {
   const baseUrl = upstream.apiUrl.trim().replace(/\/+$/, '')
   if (baseUrl === '') throw new ImageGenError('api_url 未配置：请先在「设置 → 插件 → 可配置」中填写', 'config-missing')
   // ComfyUI's local service has no auth: an empty api_key is the normal
@@ -1007,7 +1011,7 @@ async function generateComfyUiImage(
   baseUrl: string,
   upstream: UpstreamConfig,
   request: GenerateRequest,
-  options: { signal?: AbortSignal },
+  options: { signal?: AbortSignal; onComfyPrompt?: (promptId: string) => void },
 ): Promise<GenerateResult> {
   const alias = request.model.trim()
   // The model alias carries the relative workflow path after the `comfyui:`
@@ -1038,10 +1042,21 @@ async function generateComfyUiImage(
   const imageFiles = request.imageSlots !== undefined && request.imageSlots.length > 0
     ? await uploadComfyUiImages(baseUrl, upstream.apiKey, request.imageSlots, options.signal)
     : []
-  const images = (await Promise.all(
-    Array.from({ length: count }, async () => runOneComfyUiWorkflow(baseUrl, upstream, workflowTemplate, request, overrides, imageFiles, options.signal)),
-  )).flat()
-  return { images }
+  // Round 4.6: collect the prompt ids of every submitted sub-run so the
+  // caller can correlate live ComfyUI WS progress with the canvas node.
+  const promptIds: string[] = []
+  const onPrompt = (promptId: string): void => {
+    promptIds.push(promptId)
+    options.onComfyPrompt?.(promptId)
+  }
+  const results = await Promise.all(
+    Array.from({ length: count }, async () => runOneComfyUiWorkflow(baseUrl, upstream, workflowTemplate, request, overrides, imageFiles, onPrompt, options.signal)),
+  )
+  const images = results.flatMap(result => result.images)
+  // First sub-run's params represent the run; multi-run batches only vary
+  // by seed, and the first is as good as any for provenance.
+  const params = results[0]?.params
+  return { images, comfy: { promptIds, ...(params === undefined ? {} : { params }) } }
 }
 
 /** Narrow the loosely-typed `request.overrides` (it arrives over JSON) to a
@@ -1063,8 +1078,9 @@ async function runOneComfyUiWorkflow(
   request: GenerateRequest,
   overrides: Record<string, unknown> | undefined,
   imageFiles: ComfyUiImageUpload[],
+  onComfyPrompt: (promptId: string) => void,
   signal?: AbortSignal,
-): Promise<GeneratedImage[]> {
+): Promise<{ images: GeneratedImage[]; params: Record<string, unknown> }> {
   // Deep-clone so the per-run injection does not leak seeds into siblings.
   const workflow: ApiWorkflow = JSON.parse(JSON.stringify(workflowTemplate))
   const summary: InjectionSummary = injectPromptIntoWorkflow(workflow, { positive: request.prompt })
@@ -1093,7 +1109,13 @@ async function runOneComfyUiWorkflow(
     }
   }
   const promptId = await submitComfyUiPrompt(baseUrl, upstream, workflow, signal)
-  return await waitForComfyUiOutputs(baseUrl, upstream.apiKey, promptId, signal)
+  onComfyPrompt(promptId)
+  // Round 4.6.1: snapshot the FINAL widget values (post-injection /
+  // post-override, including the random seed) so the canvas can attach
+  // them to the produced images as provenance.
+  const params = snapshotWorkflowParams(workflow)
+  const images = await waitForComfyUiOutputs(baseUrl, upstream.apiKey, promptId, signal)
+  return { images, params }
 }
 
 /** POST the (mutated) workflow JSON to ComfyUI and return the assigned id. */

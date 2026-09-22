@@ -159,7 +159,10 @@ async function promptIdInComfyQueue(
       const list = record[key]
       if (!Array.isArray(list)) continue
       for (const item of list) {
-        if (Array.isArray(item) && item[0] === promptId) return true
+        // `/queue` item shapes vary by build: `[prompt_id, count, processed]`
+        // on classic ComfyUI vs `[number, prompt_id, workflow]` on newer
+        // builds. Check both leading slots.
+        if (Array.isArray(item) && (item[0] === promptId || item[1] === promptId)) return true
       }
     }
     return false

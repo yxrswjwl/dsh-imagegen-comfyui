@@ -22,6 +22,7 @@ import { enhancePrompt, listImageModels, listPromptModels, type PromptModelConfi
 import { analyzeLayers, MAX_LAYER_IMAGE_BYTES } from './layer-analyzer.ts'
 import { normalizeImageModels } from './image-models.ts'
 import { ImageGenerationRuntime, type ChannelsView } from './generation-runtime.ts'
+import { progressForWorkflowNode, progressTrackerFor } from './comfyui-progress.ts'
 import { appendHistory, clearHistory, listHistory, readHistoryImage, removeHistory } from './history-store.ts'
 import { appendGallery, clearGallery, listGallery, readGalleryImage, removeGallery, updateGalleryTags } from './gallery-store.ts'
 import { baseMime, canvasStore, CanvasConflictError, MAX_CANVAS_FILE_BYTES, mimeFromFileName, safeFileName, type CanvasFileInput, type CanvasImageInput, type CanvasStore } from './canvas-store.ts'
@@ -2078,6 +2079,14 @@ export function makeRoutes(deps: ImageGenRoutesDeps): WebRoute[] {
         // `model` on the workflow metadata; reuse it for the run.
         const channelId = metadata.channelId
         const modelAlias = metadata.model
+        // Round 4.6: live progress. Correlate every submitted ComfyUI run
+        // back to this workflow node so the canvas can poll a percentage
+        // while the run is in flight.
+        const channelView = channelViewOf()
+        const progressBase = channelView.channels.find(candidate => candidate.id === channelId)?.apiUrl?.trim()
+        const progressTracker = progressBase !== undefined && progressBase !== ''
+          ? progressTrackerFor(progressBase)
+          : undefined
         // Round 4.3: the canvas node owns a `${nodeId}:${inputName}` map of
         // widget overrides plus a run multiplier. Both are re-validated
         // here (the canvas document is just JSON on disk, not a trusted
@@ -2113,13 +2122,27 @@ export function makeRoutes(deps: ImageGenRoutesDeps): WebRoute[] {
             ...overrides === undefined ? {} : { overrides },
             ...imageSlots.length === 0 ? {} : { imageSlots },
           }
-          const result = await runtime.run({ ...request, channelId }, controller.signal)
+          // Round 4.6: make sure the progress socket is connected BEFORE
+          // the run starts — fast workflows finish before any progress
+          // frame arrives if the socket is still connecting.
+          if (progressTracker !== undefined) await progressTracker.ensureConnected()
+          const result = await runtime.run(
+            { ...request, channelId },
+            controller.signal,
+            progressTracker === undefined ? undefined : (promptId => progressTracker.register(workflowNodeId, promptId)),
+          )
           const images = result.images
           if (images.length === 0) {
             writeJson(res, 200, { ok: false, code: 'no-output', message: 'ComfyUI 未返回任何图片' })
             return
           }
-          writeJson(res, 200, { ok: true, images, canvasId, workflowNodeId })
+          writeJson(res, 200, {
+            ok: true,
+            images,
+            canvasId,
+            workflowNodeId,
+            ...(result.comfy?.params === undefined ? {} : { params: result.comfy.params }),
+          })
         } catch (error) {
           const message = error instanceof Error ? error.message : String(error)
           const code = error instanceof Error && 'code' in error && typeof (error as { code?: unknown }).code === 'string'
@@ -2135,6 +2158,33 @@ export function makeRoutes(deps: ImageGenRoutesDeps): WebRoute[] {
         } finally {
           clearTimeout(budget)
         }
+      },
+    },
+    // ------------------------------------------- workflow progress (round 4.6)
+    {
+      kind: 'exact',
+      path: CANVAS_API.workflowProgress,
+      handler: async (req, res) => {
+        if (!guard(req, res, 'GET')) return
+        const url = new URL(req.url ?? '', 'http://localhost')
+        const workflowNodeId = url.searchParams.get('workflowNodeId') ?? ''
+        if (workflowNodeId === '') {
+          writeJson(res, 200, { ok: false, code: 'bad-request', message: 'workflowNodeId 必填' })
+          return
+        }
+        // Best-effort: when no WS sample is live (socket down, run finished
+        // and TTL expired, or progress never emitted) report "not running"
+        // and the canvas keeps the plain spinner.
+        const sample = progressForWorkflowNode(workflowNodeId)
+        const progress = sample === null || sample.max <= 0
+          ? null
+          : Math.min(100, Math.max(0, Math.round((sample.value / sample.max) * 100)))
+        writeJson(res, 200, {
+          ok: true,
+          running: sample !== null,
+          progress,
+          node: sample?.node ?? null,
+        })
       },
     },
   ]

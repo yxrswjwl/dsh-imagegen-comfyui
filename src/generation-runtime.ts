@@ -43,7 +43,7 @@ export class ImageGenerationRuntime {
     this.queue = new GenerationTaskQueue((request, signal) => this.run(request, signal), 4)
   }
 
-  async run(request: GenerateRequest, signal?: AbortSignal): Promise<GenerateResult> {
+  async run(request: GenerateRequest, signal?: AbortSignal, onComfyPrompt?: (promptId: string) => void): Promise<GenerateResult> {
     const view = this.resolve()
     const channel = view.channels.find(candidate => candidate.id === request.channelId)
       ?? view.channels.find(candidate => candidate.id === view.defaultChannelId)
@@ -56,7 +56,7 @@ export class ImageGenerationRuntime {
       apiKey: channel.apiKey,
       ...channel.installDir === undefined ? {} : { installDir: channel.installDir },
     }
-    const result = await generateImage(upstream, request, { signal })
+    const result = await generateImage(upstream, request, { signal, ...onComfyPrompt === undefined ? {} : { onComfyPrompt } })
     try {
       const history = await this.history.append({
         id: randomUUID(),
