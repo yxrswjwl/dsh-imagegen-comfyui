@@ -14,6 +14,7 @@
  */
 
 import { useSyncExternalStore } from 'react'
+import type { ISessions } from '@deepseek-ai/dsh-api-session-controller/client'
 import type { ImageGenApi } from './api.ts'
 import type { ImageGenConfig, ImageGenScope } from './settings-scope.ts'
 import { CanvasWorkspace } from './CanvasWorkspace.tsx'
@@ -47,8 +48,11 @@ function useAnySecretSet(scope: ImageGenScope): boolean {
 export function ImageGenPanel(props: {
   api: ImageGenApi
   scope: ImageGenScope
+  /** Host session API (round 6+). When present, canvas bubble nodes can
+   *  embed a chat panel bound to the active DSH session. */
+  sessions?: ISessions
 }) {
-  const { api, scope } = props
+  const { api, scope, sessions } = props
   // The plugin language follows the DSH interface (bridged from ctx.locale);
   // this tick re-renders the tree so every tt() switches live.
   useImageGenLanguageTick()
@@ -78,5 +82,6 @@ export function ImageGenPanel(props: {
     defaultChannelId={defaultChannelId}
     channels={config?.channels ?? []}
     connected={connected}
+    sessions={sessions}
   />
 }

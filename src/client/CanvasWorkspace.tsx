@@ -8,12 +8,14 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type ChangeEvent, type CSSProperties, type PointerEvent as ReactPointerEvent, type ReactNode } from 'react'
 import { createPortal } from 'react-dom'
 import {
-  Bold, BookOpen, ChevronDown, Copy, Download, Eraser, FileText as FileTextIcon, FolderX, Hand, Image as ImageIcon,
-  Layers, Map as MapIcon, Maximize, Maximize2, MousePointer2, Palette, Pencil, PencilLine, Plus, Redo2, Scissors, SendHorizonal, Sparkles,
+  Bold, BookOpen, ChevronDown, Copy, Download, Eraser, ExternalLink, FileText as FileTextIcon, FolderX, Hand, Image as ImageIcon,
+  Layers, Map as MapIcon, Maximize, Maximize2, MessageSquare, MousePointer2, Palette, Pencil, PencilLine, Plus, Redo2, Scissors, SendHorizonal, Sparkles,
   SquareDashedMousePointer, Trash2, Type, Undo2, Upload, Wand2, Wallpaper, Workflow, X,
 } from 'lucide-react'
+import type { ISessions } from '@deepseek-ai/dsh-api-session-controller/client'
 import type { CanvasAnnotation, CanvasAssetRef, CanvasConnection, CanvasDocument, CanvasFileKind, CanvasLayerInfo, CanvasLayerPlanItem, CanvasNode, CanvasRect, CanvasSkillConfigApplyResult, CanvasSkillConfigField, CanvasSkillConfigSaveResult, CanvasSkillConfigStep, CanvasSkillConfigView, CanvasSkillDescriptor, CanvasSkillLibrary, CanvasSkillOutput, CanvasSkillRunRequest, CanvasSkillTask, CanvasSketchStroke, CanvasWorkflowNodeMeta, ImportedWorkflowLibraryEntry } from '../protocol.ts'
 import type { ImageGenApi } from './api.ts'
+import { BubbleBodyArea } from './BubbleNode.tsx'
 import { errorMessage, tt } from './helpers.ts'
 import { localizeWidgetName } from './workflow-labels.ts'
 import { autoRemoveBackground, canvasToDataUrl, compositeAnnotatedResult, containRect, cropRaster, drawAnnotation, loadRaster, rectBetween, transparencyRatio } from './image-ops.ts'
@@ -34,6 +36,9 @@ const TEXT_NODE_SIZE = { width: 280, height: 150 }
 const FILE_NODE_SIZE = { width: 300, height: 170 }
 const CONFIG_NODE_SIZE = { width: 320, height: 190 }
 const WORKFLOW_NODE_SIZE = { width: 340, height: 240 }
+/** Bubble node footprint when fully expanded (chat surface). Collapsed
+ *  bubbles render an icon-only header that fits the node's shrunk height. */
+const BUBBLE_NODE_SIZE = { width: 360, height: 380 }
 const LEGACY_CONFIG_NODE_SIZE = { width: 240, height: 96 }
 /** Sketch boards keep a fixed frame (header + square-ish board + two tool rows)
  *  so the normalized strokes always map onto the same rect. */
@@ -73,6 +78,12 @@ interface CanvasWorkspaceProps {
    *  picker is hidden. */
   channels?: ReadonlyArray<{ id: string; name: string; models: ReadonlyArray<{ alias: string; id: string }> }>
   connected: boolean
+  /** Host session API. When present, the canvas can host bubble nodes
+   *  that embed a DSH chat panel bound to either the current session
+   *  (default) or an explicit session id. Absent (an older host or test
+   *  harness) bubble creation is hidden and the bubble renderer shows a
+   *  disabled hint instead. */
+  sessions?: ISessions
   /** Round 5: history/gallery were removed with the panel/ecommerce surface
    * (no consumer on the host — the studio is gone). The legacy importRequest
    * hook for bringing a history/gallery image into the canvas is also gone.
@@ -487,7 +498,7 @@ function rasterizeSketch(strokes: CanvasSketchStroke[], boardWidth: number, boar
   return { dataUrl: canvas.toDataURL('image/png'), width: canvas.width, height: canvas.height }
 }
 
-type ToolbarIconName = 'new' | 'select' | 'pan' | 'image' | 'text' | 'file' | 'sketch' | 'eraser' | 'trash' | 'undo' | 'redo' | 'fit' | 'minimap' | 'background' | 'template' | 'download' | 'duplicate' | 'sparkle' | 'send' | 'close' | 'deleteProject' | 'annotate' | 'removeBg' | 'layers' | 'bold' | 'color' | 'skill' | 'upload' | 'expand' | 'workflow' | 'rename'
+type ToolbarIconName = 'new' | 'select' | 'pan' | 'image' | 'text' | 'file' | 'sketch' | 'eraser' | 'trash' | 'undo' | 'redo' | 'fit' | 'minimap' | 'background' | 'template' | 'download' | 'duplicate' | 'sparkle' | 'send' | 'close' | 'deleteProject' | 'annotate' | 'removeBg' | 'layers' | 'bold' | 'color' | 'skill' | 'upload' | 'expand' | 'workflow' | 'rename' | 'bubble' | 'openDSH'
 
 /** Lucide icons (stroke matches the DSH line style); one shared component so
  *  every dock/toolbar icon comes from the same well-drawn set. */
@@ -525,6 +536,8 @@ function ToolbarIcon({ name, size = 16 }: { name: ToolbarIconName; size?: number
     case 'expand': return <Maximize2 {...common} />
     case 'workflow': return <Workflow {...common} />
     case 'rename': return <PencilLine {...common} />
+    case 'bubble': return <MessageSquare {...common} />
+    case 'openDSH': return <ExternalLink {...common} />
   }
 }
 
@@ -1221,7 +1234,7 @@ function ComposerSelect(props: {
 }
 
 export function CanvasWorkspace(props: CanvasWorkspaceProps): React.JSX.Element {
-  const { api, imageModels, defaultChannelId, channels, connected, onOpenSettings } = props
+  const { api, imageModels, defaultChannelId, channels, connected, sessions, onOpenSettings } = props
   // Skill-task feed: empty for now (the canvas rebuilds it from
   // `api.canvasSkillTasks(canvasId)` after a project is loaded). The prop is
   // gone from the panel surface — what was once `tasks: GenerationTask[]` is
@@ -1596,6 +1609,34 @@ void (0 as unknown)
    *  exception — so the canvas stays consistent with the round-1 error
    *  contract. */
   // (definition continues below; patchNode is hoisted from below)
+
+  /** A bubble node embeds the host's DSH chat surface inside the canvas.
+   *  `sessionId` stays undefined so the bubble defaults to the current
+   *  session, matching the "follow current" semantics the user picked
+   *  during design. The collapsed header renders the session name; double-
+   *  clicking the node toggles to the full chat view. */
+  const createBubbleNode = useCallback((position?: Point): CanvasNode => {
+    const center = position ?? canvasCenter()
+    return {
+      id: newId('node'), type: 'bubble', title: tt('canvas.bubbleNode'),
+      x: Math.round(center.x - BUBBLE_NODE_SIZE.width / 2), y: Math.round(center.y - BUBBLE_NODE_SIZE.height / 2),
+      width: BUBBLE_NODE_SIZE.width, height: BUBBLE_NODE_SIZE.height,
+      metadata: { bubble: { collapsed: false } },
+    }
+  }, [canvasCenter])
+
+  /** Hand the center column over to DSH's native conversation panel so the
+   *  user can use the full Markdown / image / reasoning surface there.
+   *  When the host has no session yet we create a fresh one first; when
+   *  no `ISessions` service is injected we silently do nothing (the
+   *  toolbar entry is hidden too, but the button stays reachable via the
+   *  bubble node). */
+  const openDSHSession = useCallback(async (): Promise<void> => {
+    if (sessions === undefined) return
+    const list = sessions.list.getSnapshot()
+    const target = (list.current ?? await sessions.create()) as unknown as Parameters<typeof sessions.open>[0]
+    sessions.open(target)
+  }, [sessions])
 
   /** Sketch boards are image nodes carrying live stroke data; the rasterized
    *  PNG lands in `metadata.asset` (see SketchBoard) so they join generation
@@ -4118,6 +4159,7 @@ void (0 as unknown)
     const isConfig = node.type === 'config'
     const isFile = node.type === 'file'
     const isWorkflow = node.type === 'workflow'
+    const isBubble = node.type === 'bubble'
     const isSketch = isSketchNode(node)
     const fileKind = isFile ? (metadata.fileKind ?? fileKindOfAsset(asset ?? { assetId: '', url: '', mime: 'application/octet-stream', bytes: 0, width: 0, height: 0, origin: 'upload' })) : 'other'
     const hasFile = isFile && asset !== undefined && asset.url !== ''
@@ -4141,7 +4183,7 @@ void (0 as unknown)
       key={node.id}
       data-node-id={node.id}
       data-annotating={annotating ? '' : undefined}
-      className={`${css.node} ${isSketch ? css.sketchNode : isConfig ? css.configNode : isWorkflow ? css.workflowNode : isTextual ? css.textNode : css.imageNode} ${isSelected ? css.nodeSelected : ''} ${isRelated ? css.nodeRelated : ''} ${isConnectTarget ? css.nodeConnectTarget : ''}`}
+      className={`${css.node} ${isSketch ? css.sketchNode : isBubble ? css.bubbleNode : isConfig ? css.configNode : isWorkflow ? css.workflowNode : isTextual ? css.textNode : css.imageNode} ${isSelected ? css.nodeSelected : ''} ${isRelated ? css.nodeRelated : ''} ${isConnectTarget ? css.nodeConnectTarget : ''}`}
       style={{ left: node.x, top: node.y, width: node.width, height: node.height }}
       onPointerDown={event => handleNodePointerDown(event, node.id)}
       onContextMenu={event => {
@@ -4152,7 +4194,7 @@ void (0 as unknown)
       }}
     >
       <div className={css.nodeGlow} aria-hidden="true" />
-      {isTextual || isSketch || isWorkflow ? <header className={css.nodeHeader}>
+      {isTextual || isSketch || isWorkflow || isBubble ? <header className={css.nodeHeader}>
         <span className={css.nodeTitle}>{node.title}</span>
         {metadata.annotation !== undefined ? <span className={css.nodeTag}>{tt('canvas.annotationTag')}</span> : null}
         {metadata.layer !== undefined ? <span className={css.nodeTag}>{layerKindLabel(metadata.layer.kind)}</span> : null}
@@ -4207,6 +4249,13 @@ void (0 as unknown)
       </div> : null}
       {isConfig
         ? <p className={css.configHint}>已废弃的生成配置节点（v4 旧版画布数据，建议新建项目）。</p>
+        : isBubble
+        ? <BubbleBodyArea
+            node={node}
+            sessions={sessions}
+            patchBubble={updater => patchNode(node.id, { bubble: updater(node.metadata?.bubble ?? { collapsed: false }) })}
+            onToggle={() => patchNode(node.id, { bubble: { ...(node.metadata?.bubble ?? { collapsed: false }), collapsed: !(node.metadata?.bubble?.collapsed ?? false) } })}
+          />
         : isWorkflow
         ? renderWorkflowBody(node)
         : isTextual
@@ -4701,6 +4750,14 @@ void (0 as unknown)
         if (node !== undefined && node.type === 'text' && !isAnnotationCard(node)) {
           items.push({ label: tt('canvas.polish.button'), icon: 'sparkle', action: () => setPolishNode({ screen: { x: contextMenu.screen.x, y: contextMenu.screen.y }, nodeId: node.id }) })
         }
+        if (node !== undefined && node.type === 'bubble') {
+          const collapsed = node.metadata?.bubble?.collapsed ?? false
+          items.push({
+            label: collapsed ? tt('canvas.bubble.expand') : tt('canvas.bubble.collapse'),
+            icon: collapsed ? 'expand' : 'close',
+            action: () => patchNode(node.id, { bubble: { collapsed: !collapsed, sessionId: node.metadata?.bubble?.sessionId } }),
+          })
+        }
         if (node === undefined || !isAnnotationCard(node)) items.push({ label: tt('canvas.duplicate'), icon: 'duplicate', action: () => duplicateNode(contextMenu.nodeId) })
         items.push({ label: tt('canvas.delete'), icon: 'trash', action: () => deleteNode(contextMenu.nodeId), danger: true })
       } else if (contextMenu.type === 'connection') {
@@ -4730,6 +4787,7 @@ void (0 as unknown)
         <button type="button" role="menuitem" onClick={() => { placeNewNode(createEmptyFileNode(createMenu.world)); setFileTargetNodeId(null); setCreateMenu(null) }}><ToolbarIcon name="file" size={16} />{tt('canvas.skills.addFileNode')}</button>
         <button type="button" role="menuitem" onClick={() => { setFileTargetNodeId(null); fileUploadRef.current?.click(); setCreateMenu(null) }}><ToolbarIcon name="upload" size={16} />{tt('canvas.skills.fileMenuUpload')}</button>
         {channels !== undefined && channels.length > 0 ? <button type="button" role="menuitem" data-canvas-no-zoom="" onClick={() => { openWorkflowPicker(createMenu.world, createMenu.screen); setCreateMenu(null) }}><ToolbarIcon name="workflow" size={16} />{tt('canvas.addWorkflowNode')}</button> : null}
+        <button type="button" role="menuitem" onClick={() => { placeNewNode(createBubbleNode(createMenu.world)); setCreateMenu(null) }}><ToolbarIcon name="bubble" size={16} />{tt('canvas.addBubbleNode')}</button>
       </div>
     }
     if (workflowPicker !== null) {
@@ -5059,6 +5117,17 @@ void (0 as unknown)
             const rect = event.currentTarget.getBoundingClientRect()
             openWorkflowPicker(undefined, { x: rect.left + rect.width / 2, y: rect.top })
           }} />
+        </div> : null}
+        <div className={css.dockItem} data-dock-item="" data-label={tt('canvas.addBubbleNode')}>
+          <IconButton name="bubble" size={18} label={tt('canvas.addBubbleNode')} onClick={() => placeNewNode(createBubbleNode())} />
+        </div>
+        {sessions !== undefined ? <div className={css.dockItem} data-dock-item="" data-label={tt('canvas.openDSHSession')}>
+          <IconButton
+            name="openDSH"
+            size={18}
+            label={tt('canvas.openDSHSession')}
+            onClick={() => { void openDSHSession() }}
+          />
         </div> : null}
         <div className={css.dockItem} data-dock-item="" data-label={tt('canvas.skills.libraryButton')}>
           <IconButton
