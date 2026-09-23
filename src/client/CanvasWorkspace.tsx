@@ -551,7 +551,7 @@ function SkillPicker(props: {
   const skills = (props.catalog?.skills ?? []).filter(skill => term === ''
     || skill.name.toLowerCase().includes(term)
     || skill.description.toLowerCase().includes(term))
-  const compatible = (skill: CanvasSkillDescriptor): boolean => props.nodeType === 'config'
+  const compatible = (skill: CanvasSkillDescriptor): boolean => props.nodeType === 'workflow'
     ? false
     : skill.accepts.includes(props.nodeType)
   // The skills this node can actually run come first inside every group, so a
@@ -1263,13 +1263,6 @@ export function CanvasWorkspace(props: CanvasWorkspaceProps): React.JSX.Element 
     if (kind === 'image') { setImageMenu(screen); setBackgroundMenu(null) }
     else { setBackgroundMenu(screen); setImageMenu(null) }
   }, [])
-  // Round 5: the prompt-template library was a panel feature. The canvas
-  // surface can still hand a prompt off to a fresh text+config pair via
-  // `applyTemplate`, but the host library route + UI overlay are gone.
-  const [libraryOpen] = useState(false)
-  // Round 5: the picker is an upload-only dialog now; history / gallery
-  // came from the host stores that the studio used, and the studio is gone.
-  const [pickerTab, setPickerTab] = useState<'upload'>('upload')
   /** Canvas file nodes: the hidden file input plus the skill catalog overlay. */
   const fileUploadRef = useRef<HTMLInputElement>(null)
   const [fileTargetNodeId, setFileTargetNodeId] = useState<string | null>(null)
@@ -1564,16 +1557,6 @@ void (0 as unknown)
     }
   }, [canvasCenter])
 
-  const createConfigNode = useCallback((position?: Point): CanvasNode => {
-    const center = position ?? canvasCenter()
-    return {
-      id: newId('node'), type: 'config', title: tt('canvas.configNode'),
-      x: Math.round(center.x - CONFIG_NODE_SIZE.width / 2), y: Math.round(center.y - CONFIG_NODE_SIZE.height / 2),
-      width: CONFIG_NODE_SIZE.width, height: CONFIG_NODE_SIZE.height,
-      metadata: { status: 'idle' },
-    }
-  }, [canvasCenter])
-
   /** A workflow node carries a ComfyUI workflow reference plus an inspection
    *  snapshot the host returns. The host endpoint resolves the channel +
    *  model pair, reads the workflow file, runs the inspector, and feeds
@@ -1598,27 +1581,13 @@ void (0 as unknown)
     }
   }, [canvasCenter])
 
-  /** A brand-new canvas starts with one text node wired into one config node,
-   *  laid out around the visible viewport center so the workflow is obvious. */
+  /** A brand-new canvas starts empty: the user picks their own starting nodes
+   *  from the dock or right-click menu. Round 5 dropped the auto-seeded
+   *  text+config pair so the canvas is a blank slate. */
   const seedDocument = useCallback((created: CanvasDocument): CanvasDocument => {
     if (created.nodes.length > 0) return created
-    const bounds = viewportRef.current?.getBoundingClientRect()
-    const viewport = created.viewport
-    const center = bounds !== undefined && bounds.width > 0 && bounds.height > 0
-      ? { x: (bounds.width / 2 - viewport.x) / viewport.k, y: (bounds.height / 2 - viewport.y) / viewport.k }
-      : { x: 480, y: 320 }
-    const config = createConfigNode(center)
-    const text: CanvasNode = {
-      ...createTextNode(),
-      x: Math.round(config.x - TEXT_NODE_SIZE.width - 80),
-      y: Math.round(config.y + (CONFIG_NODE_SIZE.height - TEXT_NODE_SIZE.height) / 2),
-    }
-    return {
-      ...created,
-      nodes: [text, config],
-      connections: [{ id: newId('edge'), fromNodeId: text.id, toNodeId: config.id }],
-    }
-  }, [createConfigNode, createTextNode])
+    return { ...created, nodes: [], connections: [] }
+  }, [])
 
   const updateNodes = useCallback((updater: (nodes: CanvasNode[]) => CanvasNode[]): void => {
     updateDocument(previous => ({ ...previous, nodes: updater(previous.nodes) }))
@@ -2382,7 +2351,7 @@ void (0 as unknown)
     if (current === null) return [node.id]
     const selected = current.nodes.filter(candidate => selectedIdsRef.current.has(candidate.id))
     if (selected.length <= 1) return [node.id]
-    const compatible = selected.filter(candidate => candidate.type !== 'config' && skill.accepts.includes(candidate.type))
+    const compatible = selected.filter(candidate => candidate.type !== 'workflow' && skill.accepts.includes(candidate.type))
     if (compatible.length <= 1) return [node.id]
     return compatible.slice(0, MAX_BATCH_SKILL_NODES).map(candidate => candidate.id)
   }, [])
@@ -2391,7 +2360,7 @@ void (0 as unknown)
   const skillBatchCount = useCallback((nodeId: string): number => {
     const current = documentRef.current
     if (current === null) return 1
-    const selected = current.nodes.filter(node => selectedIdsRef.current.has(node.id) && node.type !== 'config')
+    const selected = current.nodes.filter(node => selectedIdsRef.current.has(node.id) && node.type !== 'workflow')
     return Math.max(1, Math.min(selected.length, MAX_BATCH_SKILL_NODES, current.nodes.length))
   }, [])
 
@@ -3725,25 +3694,6 @@ void (0 as unknown)
     setBackgroundMenu(null)
   }, [mutate])
 
-  const applyTemplate = useCallback((prompt: string): void => {
-    const center = canvasCenter()
-    const config = createConfigNode(center)
-    const text = createTextNode()
-    const placed: CanvasNode = {
-      ...text,
-      x: Math.round(config.x - TEXT_NODE_SIZE.width - 80),
-      y: Math.round(config.y + (config.height - TEXT_NODE_SIZE.height) / 2),
-      metadata: { text: prompt, fontSize: 14 },
-    }
-    mutate(previous => ({
-      ...previous,
-      nodes: [...previous.nodes, placed, config],
-      connections: [...previous.connections, { id: newId('edge'), fromNodeId: placed.id, toNodeId: config.id }],
-    }))
-    setSelectedIds(new Set([config.id])); setSelectedConnectionId(null)
-    setSkillLibraryOpen(false)
-  }, [canvasCenter, createConfigNode, createTextNode, mutate])
-
   const gridSize = GRID_SIZE * (document?.viewport.k ?? 1)
   const gridOffsetX = (document?.viewport.x ?? 0) % gridSize
   const gridOffsetY = (document?.viewport.y ?? 0) % gridSize
@@ -4093,7 +4043,7 @@ void (0 as unknown)
         <span className={css.composerChip}>{tt('canvas.composerLinked', { count: (document?.connections ?? []).filter(connection => connection.toNodeId === node.id).length })}</span>
       </div> : null}
       {isConfig
-        ? <p className={css.configHint}>{tt('canvas.configHint')}</p>
+        ? <p className={css.configHint}>已废弃的生成配置节点（v4 旧版画布数据，建议新建项目）。</p>
         : isWorkflow
         ? renderWorkflowBody(node)
         : isTextual
@@ -4582,7 +4532,7 @@ void (0 as unknown)
           items.push({ label: tt('canvas.skills.fileDownload'), icon: 'download', action: () => downloadFileNode(node) })
           items.push({ label: tt('canvas.preview.expand'), icon: 'expand', action: () => openFileNode(node) })
         }
-        if (node !== undefined && node.type !== 'config') {
+        if (node !== undefined && node.type !== 'workflow') {
           items.push({ label: tt('canvas.skills.button'), icon: 'skill', action: () => openSkillMenu(node, { x: contextMenu.screen.x, y: contextMenu.screen.y }) })
         }
         if (node !== undefined && node.type === 'text' && !isAnnotationCard(node)) {
@@ -4616,7 +4566,6 @@ void (0 as unknown)
         <button type="button" role="menuitem" onClick={() => { placeNewNode(createImageNode({ assetId: '', url: '', mime: 'image/png', bytes: 0, width: 1, height: 1, origin: 'upload' }, createMenu.world)); setCreateMenu(null) }}><ToolbarIcon name="image" size={16} />{tt('canvas.addImageNode')}</button>
         <button type="button" role="menuitem" onClick={() => { placeNewNode(createEmptyFileNode(createMenu.world)); setFileTargetNodeId(null); setCreateMenu(null) }}><ToolbarIcon name="file" size={16} />{tt('canvas.skills.addFileNode')}</button>
         <button type="button" role="menuitem" onClick={() => { setFileTargetNodeId(null); fileUploadRef.current?.click(); setCreateMenu(null) }}><ToolbarIcon name="upload" size={16} />{tt('canvas.skills.fileMenuUpload')}</button>
-        <button type="button" role="menuitem" onClick={() => { placeNewNode(createConfigNode(createMenu.world)); setCreateMenu(null) }}><ToolbarIcon name="sparkle" size={16} />{tt('canvas.addConfigNode')}</button>
         {channels !== undefined && channels.length > 0 ? <button type="button" role="menuitem" data-canvas-no-zoom="" onClick={() => { openWorkflowPicker(createMenu.world, createMenu.screen); setCreateMenu(null) }}><ToolbarIcon name="workflow" size={16} />{tt('canvas.addWorkflowNode')}</button> : null}
       </div>
     }
@@ -4855,9 +4804,6 @@ void (0 as unknown)
             onClick={() => { setFileTargetNodeId(null); fileUploadRef.current?.click() }}
           />
         </div>
-        <div className={css.dockItem} data-dock-item="" data-label={tt('canvas.addConfigNode')}>
-          <IconButton name="sparkle" size={18} label={tt('canvas.addConfigNode')} onClick={() => placeNewNode(createConfigNode())} />
-        </div>
         {channels !== undefined && channels.length > 0 ? <div className={css.dockItem} data-dock-item="" data-label={tt('canvas.addWorkflowNode')}>
           <IconButton name="workflow" size={18} label={tt('canvas.addWorkflowNode')} onClick={event => {
             // The contextMenu uses `transform: translate(-50%, -100% - 8px)`
@@ -5050,7 +4996,6 @@ void (0 as unknown)
       <button type="button" role="menuitem" onClick={() => { addConnectedNode(nodeAddMenu.nodeId, position => createTextNode(position)); setNodeAddMenu(null) }}><ToolbarIcon name="text" size={16} />{tt('canvas.addTextNode')}</button>
       <button type="button" role="menuitem" onClick={() => { addConnectedNode(nodeAddMenu.nodeId, position => createSketchNode(position)); setNodeAddMenu(null) }}><ToolbarIcon name="sketch" size={16} />{tt('canvas.addSketchNode')}</button>
       <button type="button" role="menuitem" onClick={() => { addConnectedNode(nodeAddMenu.nodeId, position => createImageNode({ assetId: '', url: '', mime: 'image/png', bytes: 0, width: 1, height: 1, origin: 'upload' }, position)); setNodeAddMenu(null) }}><ToolbarIcon name="image" size={16} />{tt('canvas.addImageNode')}</button>
-      {nodeAddMenu.nodeType !== 'config' ? <button type="button" role="menuitem" onClick={() => { addConnectedNode(nodeAddMenu.nodeId, position => createConfigNode(position)); setNodeAddMenu(null) }}><ToolbarIcon name="sparkle" size={16} />{tt('canvas.addConfigNode')}</button> : null}
     </div> : null}
 
     <div className={css.zoomDock} data-canvas-no-zoom="">
@@ -5080,8 +5025,7 @@ void (0 as unknown)
     /> : null}
     {/* Round 5: the prompt-template library overlay was a panel feature.
         The host no longer exposes a template-library route; the icon and
-        dialog are gone. `applyTemplate` still works for any caller that
-        wants to drop a ready-made prompt into a text+config pair. */}
+        dialog are gone. */}
     {skillLibraryOpen ? <SkillLibraryDialog
       library={skillLibrary}
       loading={libraryLoading}
@@ -5110,7 +5054,7 @@ void (0 as unknown)
       defaultChannelId={defaultChannelId}
       canvasId={document?.id ?? ''}
       connected={connected}
-      initialTab={pickerTab}
+      initialTab="upload"
       onClose={() => setPickerOpen(false)}
       onAssets={assets => { addAssets(assets); setPickerOpen(false) }}
     /> : null}
