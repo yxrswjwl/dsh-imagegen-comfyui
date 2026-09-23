@@ -32,7 +32,7 @@ import { isComfyUiPreset, listComfyUiWorkflows, probeComfyUiService } from './co
 import { IMAGE_PRESETS } from './presets.ts'
 import { CANVAS_API, CANVAS_SKILL_API, IMAGEGEN_SETTINGS_NAMESPACE, IMAGE_MODEL_API, PRESETS_API, SETTINGS_API, type CanvasDocument, type CanvasSkillCatalog, type CanvasSkillConfigApplyRequest, type CanvasSkillConfigApplyResult, type CanvasSkillConfigSaveRequest, type CanvasSkillConfigSaveResult, type CanvasSkillInstallRequest, type CanvasSkillInstallResult, type CanvasSkillLibrary, type CanvasSkillRemoveResult, type CanvasSkillRunRequest, type CanvasSkillTask, type CanvasGenerateRequest, type ImportedWorkflowLibraryDeleteRequest, type ImportedWorkflowLibraryImportRequest, type ImportedWorkflowLibraryListResult, type ImportedWorkflowLibraryRenameRequest, type ModelMapping, type PresetProviderView } from './protocol.ts'
 import { imageDataRoot } from './image-storage-path.ts'
-import { deleteImportedWorkflow, importWorkflowToLibrary, listImportedWorkflows, renameImportedWorkflow } from './workflow-library.ts'
+import { deleteImportedWorkflow, importWorkflowToLibrary, listImportedWorkflows, pathOfImportedWorkflow, renameImportedWorkflow } from './workflow-library.ts'
 
 /** Cap on JSON request bodies (settings ops and canvas payloads are small). */
 const MAX_JSON_BODY_BYTES = 24 * 1024 * 1024
@@ -973,16 +973,43 @@ export function makeRoutes(deps: ImageGenRoutesDeps): WebRoute[] {
           writeJson(res, 200, { ok: false, code: 'no-channels', message: '尚未配置任何渠道' })
           return
         }
-        const mapping = channel.models.find(entry => entry.alias === model || entry.id === model)
-        if (mapping === undefined) {
+        // Library reference: a model string of the shape `library:<id>` is
+        // a pointer into the imported workflow library (managed by
+        // `src/workflow-library.ts`). We resolve it to the stored absolute
+        // path and bypass the channel.models check — these workflows live
+        // outside the configured model aliases on purpose, so the canvas
+        // can use a previously-uploaded JSON with any ComfyUI channel.
+        let libraryWorkflowPath: string | undefined
+        if (model.startsWith('library:')) {
+          const libraryId = model.slice('library:'.length).trim()
+          if (libraryId === '') {
+            writeJson(res, 200, { ok: false, code: 'bad-request', message: 'library 别名缺少 id' })
+            return
+          }
+          const resolved = await pathOfImportedWorkflow(libraryId)
+          if (resolved === null) {
+            writeJson(res, 200, { ok: false, code: 'library-not-found', message: `库中找不到工作流 id「${libraryId}」` })
+            return
+          }
+          libraryWorkflowPath = resolved
+        }
+        // Only the channel.models lookup is meaningful for non-library
+        // aliases; library aliases skip it by design.
+        const mapping = libraryWorkflowPath !== undefined
+          ? undefined
+          : channel.models.find(entry => entry.alias === model || entry.id === model)
+        if (libraryWorkflowPath === undefined && mapping === undefined) {
           writeJson(res, 200, { ok: false, code: 'image-model-not-configured', message: `模型「${model}」未在渠道「${channel.name}」配置` })
           return
         }
         // The model alias may carry a family prefix (`comfyui:`) that the
-        // engine strips when reading the workflow; mirror that here.
-        const workflowPath = mapping.alias.startsWith('comfyui:')
-          ? mapping.alias.slice('comfyui:'.length)
-          : (mapping.id.trim() === '' ? mapping.alias : mapping.id)
+        // engine strips when reading the workflow; mirror that here. For
+        // library aliases the workflow "path" is the absolute file path
+        // itself, so the loader's absolute-path branch will pick it up.
+        const workflowPath = libraryWorkflowPath
+          ?? (mapping!.alias.startsWith('comfyui:')
+            ? mapping!.alias.slice('comfyui:'.length)
+            : (mapping!.id.trim() === '' ? mapping!.alias : mapping!.id))
         try {
           // Round 3.5: an explicit `workflowBody` (e.g. an API-format JSON
           // the user uploaded) lets the canvas preview a workflow that is
@@ -1035,22 +1062,26 @@ export function makeRoutes(deps: ImageGenRoutesDeps): WebRoute[] {
           // Project the scanner output into the canvas metadata shape.
           const workflowName = inspectedFrom === 'imported'
             ? (typeof body?.workflowName === 'string' && body.workflowName.trim() !== '' ? body.workflowName.trim() : '已导入工作流')
-            : (workflowPath.includes('/')
-              ? workflowPath.slice(workflowPath.lastIndexOf('/') + 1)
+            : (workflowPath.includes('/') || workflowPath.includes('\\')
+              ? workflowPath.slice(Math.max(workflowPath.lastIndexOf('/'), workflowPath.lastIndexOf('\\')) + 1)
               : workflowPath)
           // Imported workflows need the engine to fetch the file we just
           // wrote; switch the run-time workflowPath to that local path so
           // fetchComfyUiWorkflow picks it up via installDir's local
           // fallback (or absolute path read).
           const runWorkflowPath = importedWorkflowPath ?? workflowPath
-          // When we wrote a tmp file for an imported workflow, encode
-          // that absolute path as the model alias so generateComfyUiImage
-          // (which strips `comfyui:` and hands the remainder to the
-          // loader) ends up reading the tmp file via the new absolute-path
-          // branch.
+          // The runtime alias follows three flavours:
+          //  - imported legacy / library: `comfyui:<absolute-path>` so the
+          //    loader's absolute-path branch reads the file we just wrote
+          //  - regular channel model: the original `mapping.alias`
+          // When the user picked from the library, mapping is undefined
+          // (we skipped the channel.models lookup) — use the absolute
+          // path alias so generateComfyUiImage can find the same file.
           const runModel = importedWorkflowPath !== undefined
             ? `comfyui:${importedWorkflowPath}`
-            : mapping.alias
+            : libraryWorkflowPath !== undefined
+              ? `comfyui:${libraryWorkflowPath}`
+              : mapping!.alias
           writeJson(res, 200, {
             ok: true,
             inspection: {

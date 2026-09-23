@@ -1750,7 +1750,7 @@ void (0 as unknown)
       setError(message)
     }
     const fallbackModel = channel.models[0]?.alias ?? ''
-    const model = entry !== null ? `comfyui:${entry.path}` : fallbackModel
+    const model = entry !== null ? `library:${entry.id}` : fallbackModel
     if (model === '') return null
     const workflowPath = entry?.path ?? '(imported)'
     const workflowName = entry?.displayName ?? file.name.replace(/\.json$/i, '')
@@ -1823,16 +1823,18 @@ void (0 as unknown)
     }
   }, [api])
 
-  /** Place a workflow node using a library entry as its source. Mirrors the
-   *  shape of `createWorkflowNode` but skips the model-alias resolution —
-   *  the inspect endpoint already understands `comfyui:<absolute-path>`,
-   *  so we feed it the entry's stored path verbatim. */
+  /** Place a workflow node using a library entry as its source. The model
+   *  alias uses the `library:<id>` namespace so the host inspect endpoint
+   *  resolves it through the workflow library without insisting the alias
+   *  is in the channel's configured model list. The inspect response then
+   *  rewrites the runtime alias to `comfyui:<absolute-path>` for the
+   *  actual generation pass. */
   const createWorkflowFromLibrary = useCallback(async (entry: ImportedWorkflowLibraryEntry, channelId: string): Promise<void> => {
     if (channels === undefined) return
     const channel = channels.find(candidate => candidate.id === channelId)
     if (channel === undefined) return
     const center = canvasCenter()
-    const modelAlias = `comfyui:${entry.path}`
+    const modelAlias = `library:${entry.id}`
     const node: CanvasNode = {
       id: newId('node'),
       type: 'workflow',
