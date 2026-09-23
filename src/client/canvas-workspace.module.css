@@ -3571,3 +3571,191 @@
 
 .fileOverlayBody .fileTableWrap { padding: 10px; }
 
+/* ------------------------------------------------------ bubble node */
+
+.bubbleNode {
+  padding: 0;
+  border-color: color-mix(in srgb, var(--dsw-alias-brand-primary) 35%, var(--dsw-alias-border-l1));
+  cursor: default;
+}
+.bubbleNode .nodeHeader { padding: 10px 12px 6px; font-size: 12px; }
+
+/* The bubble is a doorway into the host's DSH conversation panel — not a
+ * chat surface itself. The collapsed view is a small header strip (icon +
+ * title + "open in DSH" button); the expanded view adds a one-line hint
+ * about how to talk to DSH plus a follow-current toggle. No message
+ * rendering lives here; that goes through the host's native panel. */
+.bubbleCollapsed {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 14px 16px;
+  flex: 1;
+  cursor: pointer;
+}
+
+.bubbleCollapsedOpen {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 26px;
+  height: 26px;
+  border-radius: 8px;
+  border: 1px solid color-mix(in srgb, var(--dsw-alias-brand-primary) 35%, transparent);
+  background: color-mix(in srgb, var(--dsw-alias-brand-primary) 14%, transparent);
+  color: var(--dsw-alias-brand-primary);
+  cursor: pointer;
+  flex: none;
+}
+.bubbleCollapsedOpen:hover {
+  background: color-mix(in srgb, var(--dsw-alias-brand-primary) 22%, transparent);
+}
+
+.bubbleCollapsedIcon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 26px;
+  height: 26px;
+  border-radius: 8px;
+  background: color-mix(in srgb, var(--dsw-alias-brand-primary) 14%, transparent);
+  color: var(--dsw-alias-brand-primary);
+  flex: none;
+}
+
+.bubbleCollapsedBody {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+  flex: 1;
+}
+
+.bubbleCollapsedTitle {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--dsw-alias-label-primary);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.bubbleCollapsedSubtitle {
+  font-size: 11px;
+  color: var(--dsw-alias-label-tertiary);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* Expanded body: header (title + open button + collapse) + hint row. */
+.bubbleBody {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  flex: 1;
+  min-height: 0;
+  padding: 12px 14px 14px;
+}
+
+.bubbleHeader {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex: none;
+}
+
+.bubbleHeaderMain {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex: 1;
+  min-width: 0;
+}
+
+.bubbleHeaderActions { display: flex; gap: 6px; flex: none; align-items: center; }
+
+.bubbleChip {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  padding: 1px 6px;
+  border-radius: 999px;
+  font-size: 10px;
+  background: color-mix(in srgb, var(--dsw-alias-brand-primary) 14%, transparent);
+  color: var(--dsw-alias-brand-primary);
+  font-weight: 600;
+  white-space: nowrap;
+}
+.bubbleChip[data-tone='follow'] { background: color-mix(in srgb, var(--dsw-alias-brand-primary) 14%, transparent); }
+
+.bubbleIconButton {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 24px;
+  height: 24px;
+  border-radius: 6px;
+  border: 1px solid color-mix(in srgb, var(--dsw-alias-border-l1) 70%, transparent);
+  background: transparent;
+  color: var(--dsw-alias-label-secondary);
+  cursor: pointer;
+  font-size: 14px;
+  line-height: 1;
+}
+.bubbleIconButton:hover { background: color-mix(in srgb, var(--dsw-alias-label-primary) 8%, transparent); color: var(--dsw-alias-label-primary); }
+
+.bubblePrimaryButton {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 5px 12px;
+  border-radius: 6px;
+  border: 1px solid color-mix(in srgb, var(--dsw-alias-brand-primary) 35%, transparent);
+  background: color-mix(in srgb, var(--dsw-alias-brand-primary) 14%, transparent);
+  color: var(--dsw-alias-brand-primary);
+  font-size: 12px;
+  font-weight: 600;
+  cursor: pointer;
+}
+.bubblePrimaryButton:hover:not(:disabled) {
+  background: color-mix(in srgb, var(--dsw-alias-brand-primary) 22%, transparent);
+}
+.bubblePrimaryButton:disabled { opacity: 0.5; cursor: not-allowed; }
+
+.bubbleGhostButton {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 4px 10px;
+  border-radius: 6px;
+  border: 1px solid color-mix(in srgb, var(--dsw-alias-border-l1) 70%, transparent);
+  background: transparent;
+  color: var(--dsw-alias-label-secondary);
+  font-size: 11.5px;
+  cursor: pointer;
+}
+.bubbleGhostButton:hover { background: color-mix(in srgb, var(--dsw-alias-label-primary) 5%, transparent); color: var(--dsw-alias-label-primary); }
+
+.bubbleHint {
+  padding: 10px 12px;
+  border-radius: 8px;
+  background: color-mix(in srgb, var(--dsw-alias-label-primary) 4%, transparent);
+  font-size: 11.5px;
+  line-height: 1.5;
+  color: var(--dsw-alias-label-secondary);
+}
+
+.bubbleHintActions { display: flex; gap: 6px; align-items: center; flex: none; }
+
+.bubbleUnavailable {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 12px 16px;
+  flex: 1;
+  color: var(--dsw-alias-label-tertiary);
+  font-size: 12px;
+  font-style: italic;
+}
+
