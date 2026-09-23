@@ -1989,6 +1989,176 @@
 .contextMenu button:hover { background: var(--dsw-alias-interactive-bg-hover); }
 .contextMenu button[data-danger] { color: var(--dsw-alias-label-error); }
 
+/* --------------------------------------------------------- workflow picker */
+
+/* Round 3.5: the canvas workflow picker grew a tab switcher (channel
+   models / imported library) and a library list with per-row actions.
+   Visually it sits in the same popover family as `.contextMenu` but with
+   a fixed min-width so a long import-name list stays readable. */
+.workflowPicker {
+  position: fixed;
+  transform: translate(-50%, calc(-100% - 8px));
+  z-index: 90;
+  display: flex;
+  min-width: 260px;
+  max-width: 360px;
+  max-height: 360px;
+  flex-direction: column;
+  padding: 5px;
+  border-radius: 11px;
+  border: 1px solid var(--dsw-alias-border-l1);
+  background: color-mix(in srgb, var(--dsw-alias-bg-layer-1) 96%, transparent);
+  box-shadow: 0 16px 40px rgb(15 23 42 / 20%);
+}
+
+.workflowPickerTabs {
+  display: flex;
+  flex: none;
+  gap: 4px;
+  padding: 0 4px 4px;
+  border-bottom: 1px solid var(--dsw-alias-border-l1);
+}
+
+.workflowPickerTabs button {
+  flex: 1;
+  padding: 5px 8px;
+  border: none;
+  border-radius: 7px;
+  background: transparent;
+  color: var(--dsw-alias-label-secondary);
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.workflowPickerTabs button:hover { background: var(--dsw-alias-interactive-bg-hover); color: var(--dsw-alias-label-primary); }
+
+.workflowPickerTabs button[data-active] {
+  background: color-mix(in srgb, var(--dsw-alias-brand-primary) 14%, transparent);
+  color: var(--dsw-alias-brand-primary);
+  font-weight: 600;
+}
+
+.workflowPickerBody {
+  display: flex;
+  flex: 1 1 auto;
+  flex-direction: column;
+  gap: 2px;
+  padding-top: 4px;
+  overflow-y: auto;
+}
+
+.workflowPickerBody button {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  border: none;
+  border-radius: 7px;
+  background: transparent;
+  color: var(--dsw-alias-label-primary);
+  font-size: 12.5px;
+  padding: 7px 10px;
+  cursor: pointer;
+  text-align: left;
+}
+
+.workflowPickerBody button:hover { background: var(--dsw-alias-interactive-bg-hover); }
+
+.workflowPickerBody button[disabled] {
+  color: var(--dsw-alias-label-tertiary);
+  cursor: default;
+  background: transparent;
+}
+
+.workflowPickerImportBtn {
+  margin-top: 4px;
+  border-top: 1px solid var(--dsw-alias-border-l1) !important;
+  padding-top: 8px !important;
+  color: var(--dsw-alias-brand-primary) !important;
+}
+
+.workflowPickerHint {
+  padding: 12px 10px;
+  color: var(--dsw-alias-label-secondary);
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+.workflowPickerHint[data-tone='error'] { color: var(--dsw-alias-label-error); }
+
+.workflowLibraryItem {
+  display: flex;
+  align-items: stretch;
+  gap: 4px;
+  border-radius: 7px;
+  border: 1px solid transparent;
+  background: transparent;
+}
+
+.workflowLibraryItem:hover { background: var(--dsw-alias-interactive-bg-hover); border-color: color-mix(in srgb, var(--dsw-alias-border-l1) 70%, transparent); }
+
+.workflowLibraryUseBtn {
+  flex: 1 1 auto;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 2px;
+  border: none !important;
+  background: transparent !important;
+  color: var(--dsw-alias-label-primary) !important;
+  padding: 7px 8px !important;
+  border-radius: 7px !important;
+  font-size: 12.5px !important;
+  cursor: pointer;
+  text-align: left;
+}
+
+.workflowLibraryName { font-weight: 500; word-break: break-all; }
+
+.workflowLibraryMeta {
+  font-size: 10.5px;
+  color: var(--dsw-alias-label-tertiary);
+  font-variant-numeric: tabular-nums;
+}
+
+.workflowLibraryActions {
+  display: flex;
+  align-items: center;
+  gap: 1px;
+  padding: 0 4px 0 0;
+}
+
+.workflowLibraryAction {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 24px;
+  height: 24px;
+  padding: 0 !important;
+  border: none;
+  border-radius: 5px;
+  background: transparent;
+  color: var(--dsw-alias-label-secondary);
+  cursor: pointer;
+}
+
+.workflowLibraryAction:hover { background: var(--dsw-alias-bg-layer-2); color: var(--dsw-alias-label-primary); }
+.workflowLibraryAction[data-danger]:hover { color: var(--dsw-alias-label-error); }
+
+.workflowLibraryRenameInput {
+  flex: 1 1 auto;
+  min-width: 0;
+  margin: 4px 0;
+  padding: 5px 8px;
+  border: 1px solid var(--dsw-alias-brand-primary);
+  border-radius: 6px;
+  background: var(--dsw-alias-bg-layer-2);
+  color: var(--dsw-alias-label-primary);
+  font: inherit;
+  font-size: 12.5px;
+}
+
+.workflowLibraryRenameInput:focus-visible { outline: none; }
+
 /* ---------------------------------------------------------- error toast */
 
 .errorToast {

@@ -30,8 +30,9 @@ import { baseMime, canvasStore, CanvasConflictError, MAX_CANVAS_FILE_BYTES, mime
 import { buildFilePreview } from './file-preview.ts'
 import { isComfyUiPreset, listComfyUiWorkflows, probeComfyUiService } from './comfyui-workflows.ts'
 import { IMAGE_PRESETS } from './presets.ts'
-import { CANVAS_API, CANVAS_SKILL_API, IMAGEGEN_SETTINGS_NAMESPACE, IMAGE_MODEL_API, PRESETS_API, SETTINGS_API, type CanvasDocument, type CanvasSkillCatalog, type CanvasSkillConfigApplyRequest, type CanvasSkillConfigApplyResult, type CanvasSkillConfigSaveRequest, type CanvasSkillConfigSaveResult, type CanvasSkillInstallRequest, type CanvasSkillInstallResult, type CanvasSkillLibrary, type CanvasSkillRemoveResult, type CanvasSkillRunRequest, type CanvasSkillTask, type CanvasGenerateRequest, type ModelMapping, type PresetProviderView } from './protocol.ts'
+import { CANVAS_API, CANVAS_SKILL_API, IMAGEGEN_SETTINGS_NAMESPACE, IMAGE_MODEL_API, PRESETS_API, SETTINGS_API, type CanvasDocument, type CanvasSkillCatalog, type CanvasSkillConfigApplyRequest, type CanvasSkillConfigApplyResult, type CanvasSkillConfigSaveRequest, type CanvasSkillConfigSaveResult, type CanvasSkillInstallRequest, type CanvasSkillInstallResult, type CanvasSkillLibrary, type CanvasSkillRemoveResult, type CanvasSkillRunRequest, type CanvasSkillTask, type CanvasGenerateRequest, type ImportedWorkflowLibraryDeleteRequest, type ImportedWorkflowLibraryImportRequest, type ImportedWorkflowLibraryListResult, type ImportedWorkflowLibraryRenameRequest, type ModelMapping, type PresetProviderView } from './protocol.ts'
 import { imageDataRoot } from './image-storage-path.ts'
+import { deleteImportedWorkflow, importWorkflowToLibrary, listImportedWorkflows, renameImportedWorkflow } from './workflow-library.ts'
 
 /** Cap on JSON request bodies (settings ops and canvas payloads are small). */
 const MAX_JSON_BODY_BYTES = 24 * 1024 * 1024
@@ -1285,6 +1286,99 @@ export function makeRoutes(deps: ImageGenRoutesDeps): WebRoute[] {
           progress,
           node: sample?.node ?? null,
         })
+      },
+    },
+    // -------------------------------- workflow library: list / rename / delete
+    // Round 3.5: imported workflows used to live as `<uuid>.json` files
+    // with no manifest; the canvas could not see them again. The library
+    // module now keeps a manifest so the picker can list / rename / delete
+    // them and re-attach to a channel via the manifest's absolute path.
+    {
+      kind: 'exact',
+      path: CANVAS_API.workflowLibraryImport,
+      handler: async (req, res) => {
+        if (!guard(req, res, 'POST')) return
+        const body = await readJsonBody(req)
+        const request = body as Partial<ImportedWorkflowLibraryImportRequest> | null
+        const workflowBody = typeof request?.body === 'string' ? request.body : ''
+        const originalName = typeof request?.originalName === 'string' ? request.originalName : ''
+        if (workflowBody === '' || originalName === '') {
+          writeJson(res, 200, { ok: false, code: 'bad-request', message: 'body 和 originalName 都必填' })
+          return
+        }
+        try {
+          const entry = await importWorkflowToLibrary({ body: workflowBody, originalName })
+          writeJson(res, 200, { ok: true, entry })
+        } catch (error) {
+          const message = error instanceof Error ? error.message : String(error)
+          writeJson(res, 200, { ok: false, code: 'library-import-failed', message })
+        }
+      },
+    },
+    {
+      kind: 'exact',
+      path: CANVAS_API.workflowLibraryList,
+      handler: async (req, res) => {
+        if (!guard(req, res, 'GET')) return
+        try {
+          const entries = await listImportedWorkflows()
+          const result: ImportedWorkflowLibraryListResult = { entries }
+          writeJson(res, 200, { ok: true, ...result })
+        } catch (error) {
+          const message = error instanceof Error ? error.message : String(error)
+          writeJson(res, 200, { ok: false, code: 'library-list-failed', message })
+        }
+      },
+    },
+    {
+      kind: 'exact',
+      path: CANVAS_API.workflowLibraryRename,
+      handler: async (req, res) => {
+        if (!guard(req, res, 'POST')) return
+        const body = await readJsonBody(req)
+        const request = body as Partial<ImportedWorkflowLibraryRenameRequest> | null
+        const id = typeof request?.id === 'string' ? request.id.trim() : ''
+        const displayName = typeof request?.displayName === 'string' ? request.displayName : ''
+        if (id === '') {
+          writeJson(res, 200, { ok: false, code: 'bad-request', message: 'id 必填' })
+          return
+        }
+        try {
+          const entry = await renameImportedWorkflow(id, displayName)
+          if (entry === null) {
+            writeJson(res, 200, { ok: false, code: 'not-found', message: '该工作流不在库中' })
+            return
+          }
+          writeJson(res, 200, { ok: true, entry })
+        } catch (error) {
+          const message = error instanceof Error ? error.message : String(error)
+          writeJson(res, 200, { ok: false, code: 'library-rename-failed', message })
+        }
+      },
+    },
+    {
+      kind: 'exact',
+      path: CANVAS_API.workflowLibraryDelete,
+      handler: async (req, res) => {
+        if (!guard(req, res, 'POST')) return
+        const body = await readJsonBody(req)
+        const request = body as Partial<ImportedWorkflowLibraryDeleteRequest> | null
+        const id = typeof request?.id === 'string' ? request.id.trim() : ''
+        if (id === '') {
+          writeJson(res, 200, { ok: false, code: 'bad-request', message: 'id 必填' })
+          return
+        }
+        try {
+          const removed = await deleteImportedWorkflow(id)
+          if (!removed) {
+            writeJson(res, 200, { ok: false, code: 'not-found', message: '该工作流不在库中' })
+            return
+          }
+          writeJson(res, 200, { ok: true, removed: true })
+        } catch (error) {
+          const message = error instanceof Error ? error.message : String(error)
+          writeJson(res, 200, { ok: false, code: 'library-delete-failed', message })
+        }
       },
     },
   ]

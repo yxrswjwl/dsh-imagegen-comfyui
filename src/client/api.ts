@@ -9,7 +9,7 @@
  * workflow inspection + run, and skill control are the only routes left.
  */
 
-import { CANVAS_API, CANVAS_SKILL_API, type CanvasAssetRef, type CanvasDocument, type CanvasFilePreview, type CanvasLayerPlan, type CanvasSkillCatalog, type CanvasSkillConfigApplyRequest, type CanvasSkillConfigApplyResult, type CanvasSkillConfigSaveRequest, type CanvasSkillConfigSaveResult, type CanvasSkillInstallRequest, type CanvasSkillInstallResult, type CanvasSkillLibrary, type CanvasSkillRemoveResult, type CanvasSkillRunRequest, type CanvasSkillTask, type CanvasSummary, type CanvasWorkflowNodeMeta, type GenerateRequest, type GeneratedImage, type GenerationTask } from '../protocol.ts'
+import { CANVAS_API, CANVAS_SKILL_API, type CanvasAssetRef, type CanvasDocument, type CanvasFilePreview, type CanvasLayerPlan, type CanvasSkillCatalog, type CanvasSkillConfigApplyRequest, type CanvasSkillConfigApplyResult, type CanvasSkillConfigSaveRequest, type CanvasSkillConfigSaveResult, type CanvasSkillInstallRequest, type CanvasSkillInstallResult, type CanvasSkillLibrary, type CanvasSkillRemoveResult, type CanvasSkillRunRequest, type CanvasSkillTask, type CanvasSummary, type CanvasWorkflowNodeMeta, type GenerateRequest, type GeneratedImage, type GenerationTask, type ImportedWorkflowLibraryEntry } from '../protocol.ts'
 import { activeImageGenLanguage } from './helpers.ts'
 
 /** Error carrying the route's JSON error message. */
@@ -336,5 +336,46 @@ export class ImageGenApi {
       progress: typeof record.progress === 'number' ? record.progress : null,
       node: typeof record.node === 'string' ? record.node : null,
     }
+  }
+
+  /** Round 3.5 extension: list the imported workflow library so the canvas
+   *  picker can show previously-imported JSON files without forcing a
+   *  re-upload. Host returns the entries newest-first. */
+  async listImportedWorkflows(): Promise<ImportedWorkflowLibraryEntry[]> {
+    const response = await fetch(CANVAS_API.workflowLibraryList, { method: 'GET' })
+    return readEnvelope<{ entries: ImportedWorkflowLibraryEntry[] }>(response).then(envelope => envelope.entries)
+  }
+
+  /** Persist a ComfyUI workflow JSON into the host's workflow library and
+   *  return the new entry. Used by the picker when the user clicks "导入
+   *  JSON" so the file lands in `<imageDataRoot>/imported-workflows/` with
+   *  a manifest row (not a transient uuid-named tmp file). */
+  async importWorkflowToLibrary(body: string, originalName: string): Promise<ImportedWorkflowLibraryEntry> {
+    const response = await fetch(CANVAS_API.workflowLibraryImport, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ body, originalName }),
+    })
+    return readEnvelope<{ entry: ImportedWorkflowLibraryEntry }>(response).then(envelope => envelope.entry)
+  }
+
+  /** Rename one library entry's display name; backing file is untouched. */
+  async renameImportedWorkflow(id: string, displayName: string): Promise<ImportedWorkflowLibraryEntry> {
+    const response = await fetch(CANVAS_API.workflowLibraryRename, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ id, displayName }),
+    })
+    return readEnvelope<{ entry: ImportedWorkflowLibraryEntry }>(response).then(envelope => envelope.entry)
+  }
+
+  /** Delete one library entry: drops the manifest row and the JSON file. */
+  async deleteImportedWorkflow(id: string): Promise<void> {
+    const response = await fetch(CANVAS_API.workflowLibraryDelete, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ id }),
+    })
+    await readEnvelope<{ removed: true }>(response)
   }
 }

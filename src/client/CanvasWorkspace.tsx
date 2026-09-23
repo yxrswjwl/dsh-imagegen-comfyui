@@ -9,10 +9,10 @@ import { useCallback, useEffect, useMemo, useRef, useState, type ChangeEvent, ty
 import { createPortal } from 'react-dom'
 import {
   Bold, BookOpen, ChevronDown, Copy, Download, Eraser, FileText as FileTextIcon, FolderX, Hand, Image as ImageIcon,
-  Layers, Map as MapIcon, Maximize, Maximize2, MousePointer2, Palette, Pencil, Plus, Redo2, Scissors, SendHorizonal, Sparkles,
+  Layers, Map as MapIcon, Maximize, Maximize2, MousePointer2, Palette, Pencil, PencilLine, Plus, Redo2, Scissors, SendHorizonal, Sparkles,
   SquareDashedMousePointer, Trash2, Type, Undo2, Upload, Wand2, Wallpaper, Workflow, X,
 } from 'lucide-react'
-import type { CanvasAnnotation, CanvasAssetRef, CanvasConnection, CanvasDocument, CanvasFileKind, CanvasLayerInfo, CanvasLayerPlanItem, CanvasNode, CanvasRect, CanvasSkillConfigApplyResult, CanvasSkillConfigField, CanvasSkillConfigSaveResult, CanvasSkillConfigStep, CanvasSkillConfigView, CanvasSkillDescriptor, CanvasSkillLibrary, CanvasSkillOutput, CanvasSkillRunRequest, CanvasSkillTask, CanvasSketchStroke, CanvasWorkflowNodeMeta } from '../protocol.ts'
+import type { CanvasAnnotation, CanvasAssetRef, CanvasConnection, CanvasDocument, CanvasFileKind, CanvasLayerInfo, CanvasLayerPlanItem, CanvasNode, CanvasRect, CanvasSkillConfigApplyResult, CanvasSkillConfigField, CanvasSkillConfigSaveResult, CanvasSkillConfigStep, CanvasSkillConfigView, CanvasSkillDescriptor, CanvasSkillLibrary, CanvasSkillOutput, CanvasSkillRunRequest, CanvasSkillTask, CanvasSketchStroke, CanvasWorkflowNodeMeta, ImportedWorkflowLibraryEntry } from '../protocol.ts'
 import type { ImageGenApi } from './api.ts'
 import { errorMessage, tt } from './helpers.ts'
 import { localizeWidgetName } from './workflow-labels.ts'
@@ -182,6 +182,21 @@ async function assetToDataUrl(asset: CanvasAssetRef): Promise<string> {
 
 function clampScale(scale: number): number {
   return Math.min(MAX_SCALE, Math.max(MIN_SCALE, scale))
+}
+
+/** Render a byte count as a short, human-friendly label (`12.3 KB`).
+ *  Used by the imported-workflow library list. */
+function formatBytes(bytes: number): string {
+  if (!Number.isFinite(bytes) || bytes <= 0) return '0 B'
+  const units = ['B', 'KB', 'MB', 'GB']
+  let value = bytes
+  let unitIndex = 0
+  while (value >= 1024 && unitIndex < units.length - 1) {
+    value /= 1024
+    unitIndex += 1
+  }
+  const precision = unitIndex === 0 ? 0 : 1
+  return `${value.toFixed(precision)} ${units[unitIndex]}`
 }
 
 function sizeForAsset(asset: CanvasAssetRef): { width: number; height: number } {
@@ -472,7 +487,7 @@ function rasterizeSketch(strokes: CanvasSketchStroke[], boardWidth: number, boar
   return { dataUrl: canvas.toDataURL('image/png'), width: canvas.width, height: canvas.height }
 }
 
-type ToolbarIconName = 'new' | 'select' | 'pan' | 'image' | 'text' | 'file' | 'sketch' | 'eraser' | 'trash' | 'undo' | 'redo' | 'fit' | 'minimap' | 'background' | 'template' | 'download' | 'duplicate' | 'sparkle' | 'send' | 'close' | 'deleteProject' | 'annotate' | 'removeBg' | 'layers' | 'bold' | 'color' | 'skill' | 'upload' | 'expand' | 'workflow'
+type ToolbarIconName = 'new' | 'select' | 'pan' | 'image' | 'text' | 'file' | 'sketch' | 'eraser' | 'trash' | 'undo' | 'redo' | 'fit' | 'minimap' | 'background' | 'template' | 'download' | 'duplicate' | 'sparkle' | 'send' | 'close' | 'deleteProject' | 'annotate' | 'removeBg' | 'layers' | 'bold' | 'color' | 'skill' | 'upload' | 'expand' | 'workflow' | 'rename'
 
 /** Lucide icons (stroke matches the DSH line style); one shared component so
  *  every dock/toolbar icon comes from the same well-drawn set. */
@@ -509,6 +524,7 @@ function ToolbarIcon({ name, size = 16 }: { name: ToolbarIconName; size?: number
     case 'upload': return <Upload {...common} />
     case 'expand': return <Maximize2 {...common} />
     case 'workflow': return <Workflow {...common} />
+    case 'rename': return <PencilLine {...common} />
   }
 }
 
@@ -1231,8 +1247,21 @@ export function CanvasWorkspace(props: CanvasWorkspaceProps): React.JSX.Element 
   const [createMenu, setCreateMenu] = useState<{ screen: Point; world: Point } | null>(null)
   const [nodeAddMenu, setNodeAddMenu] = useState<{ nodeId: string; nodeType: CanvasNode['type']; screen: Point } | null>(null)
   /** Two-step workflow picker: the create-menu lands here first; the user
-   *  picks (channel, model), then we close it and call createWorkflowNode. */
-  const [workflowPicker, setWorkflowPicker] = useState<{ screen: Point; world: Point; channelId?: string } | null>(null)
+   *  picks (channel, model | library entry), then we close it and call
+   *  createWorkflowNode. Once a channel is chosen we reveal a tabbed
+   *  second step: `models` (channel model aliases) or `library` (the
+   *  imported workflow library, round 3.5 extension). */
+  const [workflowPicker, setWorkflowPicker] = useState<{ screen: Point; world: Point; channelId?: string; mode: 'models' | 'library' } | null>(null)
+  /** Imported workflow library cache. Refreshed on picker open + after any
+   *  rename/delete mutation. Empty when the host has never reported any
+   *  entries (and we render a hint in the picker). */
+  const [importedWorkflows, setImportedWorkflows] = useState<ImportedWorkflowLibraryEntry[]>([])
+  const [importedWorkflowsLoading, setImportedWorkflowsLoading] = useState(false)
+  const [importedWorkflowsError, setImportedWorkflowsError] = useState<string | null>(null)
+  /** `id` of the entry the user is renaming in the picker (text input
+   *  replaces the row's display name while this is set). */
+  const [renamingLibraryId, setRenamingLibraryId] = useState<string | null>(null)
+  const [libraryRenameDraft, setLibraryRenameDraft] = useState<string>('')
   /** Detail popover for an image node produced by a workflow run
    *  (prompt + final params + copy buttons). Null = closed. */
   const [workflowOriginView, setWorkflowOriginView] = useState<{ nodeId: string; anchor: Point; origin: NonNullable<NonNullable<CanvasNode['metadata']>['workflowOrigin']> } | null>(null)
@@ -1701,19 +1730,33 @@ void (0 as unknown)
    *  Round 3.5: the user can't easily reach the ComfyUI "Save (API
    *  Format)" affordance (it requires login on some installations), so
    *  we let them drag any local .json that already matches the API
-   *  format straight into the inspector. The host returns the same
-   *  CanvasWorkflowNodeMeta snapshot, including textSlots and imageSlots that
-   *  drive the round-3 input connectors. */
+   *  format straight into the inspector. Round 5+: we also persist the
+   *  JSON into the imported-workflow library so the next session can
+   *  pick it back up from the picker without re-uploading. */
   const importWorkflowJson = useCallback(async (file: File): Promise<CanvasNode | null> => {
     if (channels === undefined || channels.length === 0) return null
     const channel = channels.find(candidate => candidate.models.length > 0) ?? channels[0]
     if (channel === undefined) return null
-    const model = channel.models[0]?.alias
-    if (model === undefined) return null
     const text = await file.text()
+    let entry: ImportedWorkflowLibraryEntry | null = null
+    try {
+      entry = await api.importWorkflowToLibrary(text, file.name)
+      setImportedWorkflows(current => [entry!, ...current.filter(existing => existing.id !== entry!.id)])
+    } catch (caught) {
+      // Library persistence is best-effort: the inspect path below still
+      // works when the host's <imageDataRoot>/imported-workflows/ dir is
+      // read-only (the inspect endpoint has its own tmp-file fallback).
+      const message = caught instanceof Error ? caught.message : String(caught)
+      setError(message)
+    }
+    const fallbackModel = channel.models[0]?.alias ?? ''
+    const model = entry !== null ? `comfyui:${entry.path}` : fallbackModel
+    if (model === '') return null
+    const workflowPath = entry?.path ?? '(imported)'
+    const workflowName = entry?.displayName ?? file.name.replace(/\.json$/i, '')
     const center = canvasCenter()
     const node: CanvasNode = {
-      id: newId('node'), type: 'workflow', title: file.name.replace(/\.json$/i, ''),
+      id: newId('node'), type: 'workflow', title: workflowName,
       x: Math.round(center.x - WORKFLOW_NODE_SIZE.width / 2), y: Math.round(center.y - WORKFLOW_NODE_SIZE.height / 2),
       width: WORKFLOW_NODE_SIZE.width, height: WORKFLOW_NODE_SIZE.height,
       metadata: {
@@ -1725,8 +1768,8 @@ void (0 as unknown)
           channelId: channel.id,
           channelName: channel.name,
           model,
-          workflowPath: '(imported)',
-          workflowName: file.name,
+          workflowPath,
+          workflowName,
           textSlots: [],
           imageSlots: [],
           options: [],
@@ -1737,7 +1780,12 @@ void (0 as unknown)
       },
     }
     placeNewNode(node)
-    const result = await api.canvasWorkflowInspect(channel.id, model, text, file.name)
+    // When the import landed in the library, the inspect endpoint reads the
+    // file via `comfyui:<absolute-path>` — no need to ship the body twice.
+    // Fall back to the legacy in-body path when the library write failed.
+    const result = entry === null
+      ? await api.canvasWorkflowInspect(channel.id, model, text, file.name)
+      : await api.canvasWorkflowInspect(channel.id, model)
     if (result.ok) {
       patchNode(node.id, {
         workflow: { ...result.inspection, error: undefined },
@@ -1746,7 +1794,7 @@ void (0 as unknown)
     } else {
       patchNode(node.id, {
         workflow: {
-          ...(node.metadata?.workflow ?? { fingerprint: 'failed', channelId: channel.id, model, workflowPath: '(imported)', workflowName: file.name, textSlots: [], imageSlots: [], options: [], size: null, unrecognisedCount: 0, advancedOverrides: {} }),
+          ...(node.metadata?.workflow ?? { fingerprint: 'failed', channelId: channel.id, model, workflowPath, workflowName, textSlots: [], imageSlots: [], options: [], size: null, unrecognisedCount: 0, advancedOverrides: {} }),
           status: result.status ?? 'error',
           error: result.message,
         },
@@ -1754,6 +1802,119 @@ void (0 as unknown)
     }
     return node
   }, [api, channels, patchNode, placeNewNode])
+
+  /** Re-read the imported workflow library (host's
+   *  `canvas/workflow/library/list` endpoint). Called when the picker opens
+   *  the `library` tab and after any rename/delete mutation so the UI never
+   *  carries a stale row. */
+  const refreshImportedWorkflows = useCallback(async (): Promise<ImportedWorkflowLibraryEntry[]> => {
+    setImportedWorkflowsLoading(true)
+    setImportedWorkflowsError(null)
+    try {
+      const entries = await api.listImportedWorkflows()
+      setImportedWorkflows(entries)
+      return entries
+    } catch (caught) {
+      const message = caught instanceof Error ? caught.message : String(caught)
+      setImportedWorkflowsError(message)
+      return []
+    } finally {
+      setImportedWorkflowsLoading(false)
+    }
+  }, [api])
+
+  /** Place a workflow node using a library entry as its source. Mirrors the
+   *  shape of `createWorkflowNode` but skips the model-alias resolution —
+   *  the inspect endpoint already understands `comfyui:<absolute-path>`,
+   *  so we feed it the entry's stored path verbatim. */
+  const createWorkflowFromLibrary = useCallback(async (entry: ImportedWorkflowLibraryEntry, channelId: string): Promise<void> => {
+    if (channels === undefined) return
+    const channel = channels.find(candidate => candidate.id === channelId)
+    if (channel === undefined) return
+    const center = canvasCenter()
+    const modelAlias = `comfyui:${entry.path}`
+    const node: CanvasNode = {
+      id: newId('node'),
+      type: 'workflow',
+      title: entry.displayName,
+      x: Math.round(center.x - WORKFLOW_NODE_SIZE.width / 2),
+      y: Math.round(center.y - WORKFLOW_NODE_SIZE.height / 2),
+      width: WORKFLOW_NODE_SIZE.width,
+      height: WORKFLOW_NODE_SIZE.height,
+      metadata: {
+        status: 'idle',
+        workflow: {
+          status: 'error',
+          error: tt('canvas.workflowInspectorPending'),
+          fingerprint: 'pending',
+          channelId: channel.id,
+          channelName: channel.name,
+          model: modelAlias,
+          workflowPath: entry.path,
+          workflowName: entry.displayName,
+          textSlots: [],
+          imageSlots: [],
+          options: [],
+          size: null,
+          unrecognisedCount: 0,
+          advancedOverrides: {},
+        },
+      },
+    }
+    placeNewNode(node)
+    const result = await api.canvasWorkflowInspect(channel.id, modelAlias)
+    if (result.ok) {
+      patchNode(node.id, {
+        workflow: { ...result.inspection, error: undefined },
+        status: 'idle',
+      })
+    } else {
+      patchNode(node.id, {
+        workflow: {
+          ...(node.metadata?.workflow ?? { fingerprint: 'failed', channelId: channel.id, model: modelAlias, workflowPath: entry.path, workflowName: entry.displayName, textSlots: [], imageSlots: [], options: [], size: null, unrecognisedCount: 0, advancedOverrides: {} }),
+          status: result.status ?? 'error',
+          error: result.message,
+        },
+      })
+    }
+  }, [api, channels, patchNode, placeNewNode])
+
+  /** Persist a rename the user just confirmed inside the picker. */
+  const submitRenameImportedWorkflow = useCallback(async (): Promise<void> => {
+    const id = renamingLibraryId
+    if (id === null) return
+    const next = libraryRenameDraft.trim()
+    const previous = importedWorkflows.find(entry => entry.id === id)
+    if (previous !== undefined && next === previous.displayName) {
+      setRenamingLibraryId(null)
+      setLibraryRenameDraft('')
+      return
+    }
+    try {
+      const updated = await api.renameImportedWorkflow(id, next)
+      setImportedWorkflows(current => current.map(entry => entry.id === id ? updated : entry))
+      setRenamingLibraryId(null)
+      setLibraryRenameDraft('')
+    } catch (caught) {
+      const message = caught instanceof Error ? caught.message : String(caught)
+      setError(message)
+    }
+  }, [api, importedWorkflows, libraryRenameDraft, renamingLibraryId])
+
+  /** Remove a library entry (manifest row + JSON file on disk). */
+  const removeImportedWorkflow = useCallback(async (id: string): Promise<void> => {
+    try {
+      await api.deleteImportedWorkflow(id)
+      setImportedWorkflows(current => current.filter(entry => entry.id !== id))
+      if (renamingLibraryId === id) {
+        setRenamingLibraryId(null)
+        setLibraryRenameDraft('')
+      }
+    } catch (caught) {
+      const message = caught instanceof Error ? caught.message : String(caught)
+      setError(message)
+    }
+  }, [api, renamingLibraryId])
 
   /** Persist the canvas immediately instead of waiting for the 650 ms
    *  autosave debounce. The canvas run endpoints read the document from
@@ -2291,7 +2452,7 @@ void (0 as unknown)
     // the createMenu entry point) also lands at the bottom-centre of the
     // viewport. The CSS `transform: translate(-50%, calc(-100% - 8px))`
     // takes care of the gap above the anchor.
-    setWorkflowPicker({ screen: screen ?? { x: window.innerWidth / 2, y: window.innerHeight - 14 - 42 }, world: world ?? { x: 0, y: 0 } })
+    setWorkflowPicker({ screen: screen ?? { x: window.innerWidth / 2, y: window.innerHeight - 14 - 42 }, world: world ?? { x: 0, y: 0 }, mode: 'models' })
   }, [])
 
   /** Queue one skill run through the host, grow a run card out of the source
@@ -4571,33 +4732,114 @@ void (0 as unknown)
     }
     if (workflowPicker !== null) {
       // Two-step picker: first screen asks for a channel (only ComfyUI
-      // channels offer workflows), second asks for a model alias plus an
-      // "import JSON" affordance. We re-render in place rather than stack
-      // two popovers so the menu width stays predictable.
+      // channels offer workflows), second asks for a model alias or a
+      // library entry — both behind a tab switch. We re-render in place
+      // rather than stack two popovers so the menu width stays predictable.
       if (workflowPicker.channelId === undefined) {
         const channelList = channels ?? []
         const comfyuiChannels = channelList.filter(channel => channel.id.length > 0 && channel.models.length > 0)
         return <div className={css.contextMenu} style={{ left: workflowPicker.screen.x, top: workflowPicker.screen.y }} data-canvas-no-zoom="" role="menu">
-          {comfyuiChannels.map(channel => <button key={channel.id} type="button" role="menuitem" onClick={() => { setWorkflowPicker({ ...workflowPicker, channelId: channel.id }) }}>{channel.name}</button>)}
+          {comfyuiChannels.map(channel => <button key={channel.id} type="button" role="menuitem" onClick={() => { setWorkflowPicker({ ...workflowPicker, channelId: channel.id, mode: 'models' }) }}>{channel.name}</button>)}
         </div>
       }
       const channelList = channels ?? []
       const channel = channelList.find(candidate => candidate.id === workflowPicker.channelId)
       const models = channel?.models ?? []
-      return <div className={css.contextMenu} style={{ left: workflowPicker.screen.x, top: workflowPicker.screen.y }} data-canvas-no-zoom="" role="menu">
-        {models.length === 0
-          ? <button type="button" role="menuitem" disabled>{tt('canvas.workflowEmptyAdvanced')}</button>
-          : models.map(model => <button key={model.alias} type="button" role="menuitem" title={model.alias} onClick={() => { void createWorkflowNode(workflowPicker.world, channel?.id, model.alias); setWorkflowPicker(null) }}>{model.alias.replace(/^comfyui:/, '')}</button>)}
-        <button
-          type="button"
-          role="menuitem"
-          onClick={() => {
-            setWorkflowPicker(null)
-            workflowImportRef.current?.click()
-          }}
-        >
-          <ToolbarIcon name="upload" size={16} />{tt('canvas.workflowImportJson')}
-        </button>
+      const tabs: Array<{ mode: 'models' | 'library'; label: string }> = [
+        { mode: 'models', label: tt('canvas.workflowPickerTabModels') },
+        { mode: 'library', label: tt('canvas.workflowPickerTabLibrary') },
+      ]
+      return <div className={css.workflowPicker} style={{ left: workflowPicker.screen.x, top: workflowPicker.screen.y }} data-canvas-no-zoom="" role="menu">
+        <div className={css.workflowPickerTabs} role="tablist">
+          {tabs.map(tab => <button
+            key={tab.mode}
+            type="button"
+            role="tab"
+            data-active={workflowPicker.mode === tab.mode ? '' : undefined}
+            onClick={() => {
+              setWorkflowPicker({ ...workflowPicker, mode: tab.mode })
+              if (tab.mode === 'library') void refreshImportedWorkflows()
+            }}
+          >{tab.label}</button>)}
+        </div>
+        {workflowPicker.mode === 'models'
+          ? <div className={css.workflowPickerBody} role="tabpanel">
+            {models.length === 0
+              ? <button type="button" role="menuitem" disabled>{tt('canvas.workflowEmptyAdvanced')}</button>
+              : models.map(model => <button key={model.alias} type="button" role="menuitem" title={model.alias} onClick={() => { void createWorkflowNode(workflowPicker.world, channel?.id, model.alias); setWorkflowPicker(null) }}>{model.alias.replace(/^comfyui:/, '')}</button>)}
+            <button
+              type="button"
+              role="menuitem"
+              className={css.workflowPickerImportBtn}
+              onClick={() => {
+                setWorkflowPicker(null)
+                workflowImportRef.current?.click()
+              }}
+            >
+              <ToolbarIcon name="upload" size={16} />{tt('canvas.workflowImportJson')}
+            </button>
+          </div>
+          : <div className={css.workflowPickerBody} role="tabpanel">
+            {importedWorkflowsLoading
+              ? <div className={css.workflowPickerHint}>{tt('canvas.workflowLibraryLoading')}</div>
+              : importedWorkflowsError !== null
+                ? <div className={css.workflowPickerHint} data-tone="error">{importedWorkflowsError}</div>
+                : importedWorkflows.length === 0
+                  ? <div className={css.workflowPickerHint}>{tt('canvas.workflowLibraryEmpty')}</div>
+                  : importedWorkflows.map(entry => <div key={entry.id} className={css.workflowLibraryItem} role="menuitem">
+                    {renamingLibraryId === entry.id
+                      ? <input
+                          className={css.workflowLibraryRenameInput}
+                          value={libraryRenameDraft}
+                          autoFocus
+                          aria-label={tt('canvas.workflowLibraryRenameLabel')}
+                          onChange={event => setLibraryRenameDraft(event.target.value)}
+                          onBlur={() => { void submitRenameImportedWorkflow() }}
+                          onKeyDown={event => {
+                            if (event.key === 'Enter') { event.preventDefault(); void submitRenameImportedWorkflow() }
+                            if (event.key === 'Escape') { event.preventDefault(); setRenamingLibraryId(null); setLibraryRenameDraft('') }
+                          }}
+                        />
+                      : <button
+                          type="button"
+                          className={css.workflowLibraryUseBtn}
+                          onClick={() => { void createWorkflowFromLibrary(entry, channel?.id ?? '').then(() => setWorkflowPicker(null)) }}
+                        >
+                          <span className={css.workflowLibraryName}>{entry.displayName}</span>
+                          <span className={css.workflowLibraryMeta}>
+                            {formatBytes(entry.bytes)} · {new Date(entry.importedAt).toLocaleString()}
+                          </span>
+                        </button>}
+                    <div className={css.workflowLibraryActions}>
+                      <button
+                        type="button"
+                        className={css.workflowLibraryAction}
+                        title={tt('canvas.workflowLibraryRename')}
+                        aria-label={tt('canvas.workflowLibraryRename')}
+                        onClick={() => { setRenamingLibraryId(entry.id); setLibraryRenameDraft(entry.displayName) }}
+                      ><ToolbarIcon name="rename" size={14} /></button>
+                      <button
+                        type="button"
+                        className={css.workflowLibraryAction}
+                        data-danger=""
+                        title={tt('canvas.workflowLibraryDelete')}
+                        aria-label={tt('canvas.workflowLibraryDelete')}
+                        onClick={() => { void removeImportedWorkflow(entry.id) }}
+                      ><ToolbarIcon name="trash" size={14} /></button>
+                    </div>
+                  </div>)}
+            <button
+              type="button"
+              role="menuitem"
+              className={css.workflowPickerImportBtn}
+              onClick={() => {
+                setWorkflowPicker(null)
+                workflowImportRef.current?.click()
+              }}
+            >
+              <ToolbarIcon name="upload" size={16} />{tt('canvas.workflowImportJson')}
+            </button>
+          </div>}
       </div>
     }
     if (workflowOriginView !== null) {

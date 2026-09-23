@@ -119,6 +119,19 @@ export const CANVAS_API = {
    *  Round 4.6: the canvas polls this while a run is in flight so the
    *  node can show a percentage instead of an indefinite spinner. */
   workflowProgress: '/api/dsh-imagegen/canvas/workflow/progress',
+  /** List imported workflows the user has on disk in the canvas workflow
+   *  library. Round 3.5 extension: lets the canvas picker show previously
+   *  imported JSONs without re-importing them. */
+  workflowLibraryList: '/api/dsh-imagegen/canvas/workflow/library/list',
+  /** Persist a ComfyUI workflow JSON into the canvas workflow library
+   *  (writes the JSON under `<imageDataRoot>/imported-workflows/` and adds
+   *  a manifest entry). Returns the new library entry. */
+  workflowLibraryImport: '/api/dsh-imagegen/canvas/workflow/library/import',
+  /** Rename a library entry (display name only; the backing JSON file is
+   *  not renamed). Round 3.5 extension. */
+  workflowLibraryRename: '/api/dsh-imagegen/canvas/workflow/library/rename',
+  /** Delete a library entry: drops the manifest row and the JSON file. */
+  workflowLibraryDelete: '/api/dsh-imagegen/canvas/workflow/library/delete',
 } as const
 
 /** Same-origin route family for canvas skills (catalog + run control). */
@@ -472,6 +485,45 @@ export interface CanvasSkillLibrary {
   catalog: Array<{ name: string; url: string }>
   /** Whether the host can fetch sources at all (git / network availability). */
   networkAvailable: boolean
+}
+
+/** One imported ComfyUI workflow in the canvas workflow library
+ *  (`<imageDataRoot>/imported-workflows/`). The picker lists these and
+ *  the host inspect endpoint resolves them by `id`. */
+export interface ImportedWorkflowLibraryEntry {
+  id: string
+  /** Disk filename relative to the library dir (always `<safe>.json`). */
+  file: string
+  /** Absolute path to the JSON file; cached so the inspect endpoint can
+   *  feed it straight to the workflow loader. */
+  path: string
+  /** User-facing name; rename-only mutates this. */
+  displayName: string
+  /** ISO timestamp the entry landed in the library. */
+  importedAt: string
+  /** JSON file size in bytes. */
+  bytes: number
+}
+
+export interface ImportedWorkflowLibraryRenameRequest {
+  id: string
+  displayName: string
+}
+
+export interface ImportedWorkflowLibraryImportRequest {
+  /** Raw JSON body of the workflow. */
+  body: string
+  /** Original filename the user picked (used to seed the display name and
+   *  derive a sanitised disk filename). */
+  originalName: string
+}
+
+export interface ImportedWorkflowLibraryDeleteRequest {
+  id: string
+}
+
+export interface ImportedWorkflowLibraryListResult {
+  entries: ImportedWorkflowLibraryEntry[]
 }
 
 export interface CanvasSkillInstallRequest {
