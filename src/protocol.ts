@@ -171,7 +171,7 @@ export interface CanvasAssetRef {
   textPreview?: string
 }
 
-export type CanvasNodeType = 'image' | 'text' | 'file' | 'config' | 'workflow'
+export type CanvasNodeType = 'image' | 'text' | 'file' | 'config' | 'workflow' | 'bubble'
 
 /** Coarse bucket driving the file node's icon and preview branch. */
 export type CanvasFileKind = 'text' | 'pdf' | 'image' | 'office' | 'archive' | 'audio' | 'video' | 'other'
@@ -688,6 +688,23 @@ export interface CanvasNodeMetadata {
    *  advanced-options accordion (round 2 scope). Generation wiring
    *  lives in round 3+. */
   workflow?: CanvasWorkflowNodeMeta
+  /** Bubble nodes: a canvas-side anchor for a DSH chat session. The bubble
+   *  carries a session binding so the user can pop that session into the host's
+   *  native conversation panel from inside the canvas. When `sessionId` is
+   *  undefined the bubble follows the host's currently active session. */
+  bubble?: CanvasBubbleNodeMeta
+}
+
+/** Per-node metadata for a DSH chat-bubble node. */
+export interface CanvasBubbleNodeMeta {
+  /** Header-only view (icon + current session title) vs. the expanded
+   *  panel (header + "open in DSH" button + follow-current toggle). */
+  collapsed: boolean
+  /** Explicit session binding. Undefined = follow the host's current
+   *  session (so reopening the canvas lands back on the same chat the
+   *  user is in). The bubble uses this binding as the default when its
+   *  "open in DSH" button is pressed. */
+  sessionId?: string
 }
 
 /** Snapshot of one ComfyUI workflow embedded in a canvas workflow
