@@ -27,8 +27,6 @@ import { mountPanel } from './mount.tsx'
 import { mountSidebarEntry } from './sidebar-entry.ts'
 import { ImageGenSettingsCard, ImageGenSettingsCardController } from './SettingsCard.tsx'
 import { bindImageGenScope, type ImageGenScope } from './settings-scope.ts'
-import { registerImageToolviews, type ImageToolViewOwnerProps } from './image-toolview.tsx'
-import type { ConversationService } from './conversation-sync.ts'
 
 /** Locale namespace this plugin owns. */
 const NS = 'dsh-imagegen'
@@ -50,7 +48,10 @@ declare module '@deepseek-ai/dsh-client-ui-slots' {
      */
     'settings.plugin.item': { kind: 'keyed'; scope: 'root'; owner: ImageGenPluginItemOwnerProps }
     /** Image-generation results render their durable image blocks inline. */
-    'tool.call.toolview': { kind: 'keyed'; scope: 'session'; owner: ImageToolViewOwnerProps }
+    /** Round 5: the studio's Agent tool-result renderer is gone — the
+     *  generate_image / edit_image tools were retired with the panel. The
+     *  declaration stays in the slot map so older callers still type-check. */
+    'tool.call.toolview': { kind: 'keyed'; scope: 'session'; owner: never }
   }
 }
 
@@ -61,7 +62,7 @@ export interface ImageGenPluginItemOwnerProps {
 }
 
 /** Required services (fiber inject waiting — the runtime must be up first). */
-export const inject = ['slots', 'locale', 'connection', 'sessions', 'conversation']
+export const inject = ['slots', 'locale', 'connection', 'sessions']
 
 // Internals re-exported for the standalone smoke test (the browser bundle is
 // the only place these are reachable from Node); not part of the contract.
@@ -105,7 +106,10 @@ export function apply(ctx: ClientContext): void {
     applyLocale()
     return ctx.locale.subscribe(applyLocale)
   }, 'dsh-imagegen: follow host locale')
-  registerImageToolviews(ctx)
+  // Round 5: the Agent tool-result image view went with the studio. The
+  // generate_image / edit_image / get_image_generation_task tools are gone,
+  // so there are no tool-result images to render here. The slot stays in
+  // the SlotMap above purely for older callers.
 
   const connection = ctx.get('connection') as ConnectionHandle | undefined
   const loopback = connection?.isLoopback === true
@@ -144,7 +148,6 @@ export function apply(ctx: ClientContext): void {
     const controller = new ImageGenController()
     const api = new ImageGenApi()
     const sessions = ctx.get('sessions') as ISessions | undefined
-    const conversation = ctx.get('conversation') as ConversationService | undefined
     const disposers: Array<() => void> = []
     try {
       disposers.push(mountSidebarEntry(
@@ -154,7 +157,7 @@ export function apply(ctx: ClientContext): void {
         tt('entry.image'),
         tt('entry.tooltip'),
       ))
-      disposers.push(mountPanel(controller, api, scope, { sessions, conversation }))
+      disposers.push(mountPanel(controller, api, scope, { sessions }))
       // The imperative sidebar tabs render their labels once; relabel them on
       // every DSH language switch so the entry follows the interface too.
       disposers.push(ctx.locale.subscribe(() => {

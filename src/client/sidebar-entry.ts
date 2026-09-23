@@ -1,9 +1,11 @@
 /**
  * Replace the shell's standalone New Session affordance with a two-tab entry:
- * New Session and Image Generation. When image generation is active, the
- * plugin also uses the shell's region area as a dedicated history surface;
- * the original workspace/session tree remains underneath and is restored when
- * the panel closes.
+ * New Session and Image Generation (now labelled "画布"). The original
+ * workspace/session tree remains underneath and is restored when the panel
+ * closes.
+ *
+ * Round 5: the shell region no longer hosts a history surface — the studio
+ * that fed it is gone, so the region area is left alone.
  */
 
 import type { ImageGenController } from './controller.ts'
@@ -11,8 +13,6 @@ import css from './panel.module.css'
 
 /** Stable selector for the injected two-tab host. */
 export const ENTRY_SELECTOR = '[data-dsh-imagegen-session-tabs]'
-/** Stable selector for the history surface in the shell region area. */
-export const HISTORY_HOST_SELECTOR = '[data-dsh-imagegen-history-host]'
 
 /** Inline picture glyph kept deliberately small for the sidebar rail. */
 const IMAGE_ICON = '<svg viewBox="0 0 16 16" width="14" height="14" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="2" y="2.5" width="12" height="11" rx="1.5"/><circle cx="5.6" cy="5.8" r="1"/><path d="M2.5 12.5l3.6-3.4 2.4 2.2 3-3 2 2.4"/></svg>'
@@ -35,11 +35,6 @@ function newSessionButton(root: HTMLElement): HTMLButtonElement | undefined {
   ) ?? Array.from(root.children).find(
     (child): child is HTMLButtonElement => child instanceof HTMLElement && child.tagName === 'BUTTON',
   )
-}
-
-/** Locate the shell region that normally contains workspaces and sessions. */
-function regionArea(root: HTMLElement): HTMLElement | undefined {
-  return root.querySelector<HTMLElement>('[class*="regionArea"]') ?? undefined
 }
 
 function makeTab(
@@ -113,19 +108,6 @@ function placeTabs(
   return tabs
 }
 
-/** Mount an overlay host over the workspace/session tree for image history. */
-function placeHistoryHost(root: HTMLElement): HTMLDivElement | undefined {
-  const region = regionArea(root)
-  if (region === undefined) return undefined
-  const existing = region.querySelector<HTMLDivElement>(HISTORY_HOST_SELECTOR)
-  if (existing !== null) return existing
-  const host = document.createElement('div')
-  host.dataset.dshImagegenHistoryHost = ''
-  host.className = css.sidebarHistoryHost
-  region.append(host)
-  return host
-}
-
 /**
  * Mount the two tabs and self-heal after React rebuilds the sidebar. The
  * shell-owned button is restored by the disposer so unloading the plugin
@@ -140,7 +122,6 @@ export function mountSidebarEntry(
 ): () => void {
   let root: HTMLElement | undefined
   let tabs: HTMLDivElement | undefined
-  let historyHost: HTMLDivElement | undefined
   let originalButton: HTMLButtonElement | undefined
 
   const syncActive = (): void => {
@@ -160,7 +141,6 @@ export function mountSidebarEntry(
     if (root !== undefined && !root.isConnected) {
       root = undefined
       tabs = undefined
-      historyHost = undefined
       originalButton = undefined
     }
     root ??= sidebarRoot()
@@ -170,7 +150,6 @@ export function mountSidebarEntry(
     if (button === undefined) return
     originalButton ??= button
     tabs = placeTabs(root, controller, newSessionLabel, newSessionTooltip, imageLabel, imageTooltip)
-    historyHost = placeHistoryHost(root)
     syncActive()
   }
 
@@ -183,7 +162,6 @@ export function mountSidebarEntry(
     bodyObserver.disconnect()
     unsubscribe()
     tabs?.remove()
-    historyHost?.remove()
     if (originalButton !== undefined && originalButton.isConnected) restoreShellButton(originalButton)
     if (root !== undefined) delete root.dataset.dshImagegenSidebarRoot
   }

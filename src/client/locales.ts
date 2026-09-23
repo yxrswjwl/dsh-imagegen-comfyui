@@ -3,11 +3,11 @@
  */
 
 export const zh = {
-  'entry.label': 'AI 生图',
-  'entry.tooltip': 'AI 生图面板（gpt-image-2 / glm-image / grok-imagine-image / nanobanana / seedream 系列）',
+  'entry.label': '画布',
+  'entry.tooltip': '无限画布：在节点之间连线，把工作流、文本节点、图片节点、文件节点搭成可执行的图像生成流水线',
   'entry.newSession': '新会话',
   'entry.newSessionTooltip': '创建一个新的 DSH 会话',
-  'entry.image': '生图',
+  'entry.image': '画布',
   'panel.title': 'VisioWork',
   'panel.githubTip': '觉得好用或有建议？欢迎来 GitHub 提 issues、点个 star 支持一下！',
   'conversation.add': '加入对话',
@@ -33,6 +33,8 @@ export const zh = {
   'canvas.textNode': '文本节点',
   'canvas.fromGallery': '素材库图片',
   'canvas.fromHistory': '历史图片',
+  'canvas.fromGenerated': '画布生成',
+  'canvas.useWorkflowNode': '画布现在只通过工作流节点生成图片，请使用工作流节点。',
   'canvas.project': '画布项目',
   'canvas.newCanvas': '新建画布',
   'canvas.deleteCanvas': '删除画布',
@@ -857,11 +859,11 @@ export const zh = {
 } as const
 
 export const en: Record<keyof typeof zh, string> = {
-  'entry.label': 'AI Image',
-  'entry.tooltip': 'AI image generation studio (gpt-image-2 / glm-image / grok-imagine-image / nanobanana / seedream family)',
+  'entry.label': 'Canvas',
+  'entry.tooltip': 'Infinite canvas: connect workflow / text / image / file nodes to build an executable image-generation pipeline',
   'entry.newSession': 'New session',
   'entry.newSessionTooltip': 'Create a new DSH session',
-  'entry.image': 'Image',
+  'entry.image': 'Canvas',
   'panel.title': 'VisioWork',
   'panel.githubTip': 'Like it or have suggestions? Head to GitHub to open issues and star us!',
   'conversation.add': 'Add to chat',
@@ -886,6 +888,8 @@ export const en: Record<keyof typeof zh, string> = {
   'canvas.textNode': 'Text node',
   'canvas.fromGallery': 'Gallery image',
   'canvas.fromHistory': 'History image',
+  'canvas.fromGenerated': 'Canvas generated',
+  'canvas.useWorkflowNode': 'Image generation now happens through workflow nodes; please add a workflow node on the canvas.',
   'canvas.project': 'Canvas project',
   'canvas.newCanvas': 'New canvas',
   'canvas.deleteCanvas': 'Delete canvas',
@@ -1701,11 +1705,11 @@ export type ImageGenKey = keyof typeof zh
 
 /** Russian mirror of every key (полный словарь интерфейса). */
 export const ru: Record<keyof typeof zh, string> = {
-  'entry.label': 'ИИ-генерация',
-  'entry.tooltip': 'Панель ИИ-генерации изображений (gpt-image-2 / glm-image / grok-imagine-image / nanobanana / seedream)',
+  'entry.label': 'Холст',
+  'entry.tooltip': 'Бесконечный холст: соединяйте узлы рабочих процессов / текста / изображений / файлов в исполняемый конвейер генерации изображений',
   'entry.newSession': 'Новая сессия',
   'entry.newSessionTooltip': 'Создать новую сессию DSH',
-  'entry.image': 'Генерация',
+  'entry.image': 'Холст',
   'panel.title': 'VisioWork',
   'panel.githubTip': 'Понравился плагин или есть идеи? Поставьте звезду или откройте issue на GitHub!',
   'conversation.add': 'В диалог',
@@ -1730,6 +1734,8 @@ export const ru: Record<keyof typeof zh, string> = {
   'canvas.textNode': 'Текстовый узел',
   'canvas.fromGallery': 'Из галереи',
   'canvas.fromHistory': 'Из истории',
+  'canvas.fromGenerated': 'Сгенерировано на холсте',
+  'canvas.useWorkflowNode': 'Генерация теперь выполняется через узлы рабочего процесса; добавьте узел рабочего процесса на холст.',
   'canvas.project': 'Проект холста',
   'canvas.newCanvas': 'Новый холст',
   'canvas.deleteCanvas': 'Удалить холст',

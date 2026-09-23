@@ -21,7 +21,6 @@ import type { ImageGenApi } from './api.ts'
 import type { ImageGenController } from './controller.ts'
 import { ImageGenPanel } from './ImageGenPanel.tsx'
 import type { ImageGenScope } from './settings-scope.ts'
-import type { ConversationService } from './conversation-sync.ts'
 import css from './panel.module.css'
 
 /** The injected panel container (kept in the DOM, hidden when inactive). */
@@ -130,7 +129,6 @@ export function mountPanel(
   scope: ImageGenScope,
   services: {
     sessions?: ISessions
-    conversation?: ConversationService
   } = {},
 ): () => void {
   let root: Root | undefined

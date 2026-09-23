@@ -12,12 +12,11 @@ import {
   Layers, Map as MapIcon, Maximize, Maximize2, MousePointer2, Palette, Pencil, Plus, Redo2, Scissors, SendHorizonal, Sparkles,
   SquareDashedMousePointer, Trash2, Type, Undo2, Upload, Wand2, Wallpaper, Workflow, X,
 } from 'lucide-react'
-import type { CanvasAnnotation, CanvasAssetRef, CanvasConnection, CanvasDocument, CanvasFileKind, CanvasLayerInfo, CanvasLayerPlanItem, CanvasNode, CanvasRect, CanvasSkillConfigApplyResult, CanvasSkillConfigField, CanvasSkillConfigSaveResult, CanvasSkillConfigStep, CanvasSkillConfigView, CanvasSkillDescriptor, CanvasSkillLibrary, CanvasSkillOutput, CanvasSkillRunRequest, CanvasSkillTask, CanvasSketchStroke, CanvasWorkflowNodeMeta, GenerateRequest, GenerationTask, HistoryEntry } from '../protocol.ts'
+import type { CanvasAnnotation, CanvasAssetRef, CanvasConnection, CanvasDocument, CanvasFileKind, CanvasLayerInfo, CanvasLayerPlanItem, CanvasNode, CanvasRect, CanvasSkillConfigApplyResult, CanvasSkillConfigField, CanvasSkillConfigSaveResult, CanvasSkillConfigStep, CanvasSkillConfigView, CanvasSkillDescriptor, CanvasSkillLibrary, CanvasSkillOutput, CanvasSkillRunRequest, CanvasSkillTask, CanvasSketchStroke, CanvasWorkflowNodeMeta } from '../protocol.ts'
 import type { ImageGenApi } from './api.ts'
 import { errorMessage, tt } from './helpers.ts'
 import { localizeWidgetName } from './workflow-labels.ts'
 import { autoRemoveBackground, canvasToDataUrl, compositeAnnotatedResult, containRect, cropRaster, drawAnnotation, loadRaster, rectBetween, transparencyRatio } from './image-ops.ts'
-import { TemplateLibrary } from './TemplateLibrary.tsx'
 import { CanvasFileBody, CanvasFileOverlay, fileKindLabel, fileKindOfAsset, fileSizeLabel } from './CanvasFilePreview.tsx'
 import { DotFieldBackground, DotGridBackground, FaultyTerminalBackground, FloatingLinesBackground, FlowBackground, GalaxyBackground, LiquidEtherBackground, ShapeGridBackground, SilkBackground, WavesBackground } from './CanvasBackgrounds.tsx'
 import css from './canvas-workspace.module.css'
@@ -74,10 +73,14 @@ interface CanvasWorkspaceProps {
    *  picker is hidden. */
   channels?: ReadonlyArray<{ id: string; name: string; models: ReadonlyArray<{ alias: string; id: string }> }>
   connected: boolean
-  history: HistoryEntry[]
-  gallery: HistoryEntry[]
-  tasks: GenerationTask[]
-  importRequest?: { source: 'history' | 'gallery'; entryId: string; imageIndex: number }
+  /** Round 5: history/gallery were removed with the panel/ecommerce surface
+   * (no consumer on the host — the studio is gone). The legacy importRequest
+   * hook for bringing a history/gallery image into the canvas is also gone.
+   * The props stay optional so older callers (tests, host smoke harnesses)
+   * keep compiling. */
+  history?: never
+  gallery?: never
+  importRequest?: never
   onImportRequestHandled?: () => void
   onOpenSettings?: () => void
 }
@@ -1202,7 +1205,13 @@ function ComposerSelect(props: {
 }
 
 export function CanvasWorkspace(props: CanvasWorkspaceProps): React.JSX.Element {
-  const { api, imageModels, defaultChannelId, channels, connected, history, gallery, tasks, importRequest, onImportRequestHandled, onOpenSettings } = props
+  const { api, imageModels, defaultChannelId, channels, connected, onOpenSettings } = props
+  // Skill-task feed: empty for now (the canvas rebuilds it from
+  // `api.canvasSkillTasks(canvasId)` after a project is loaded). The prop is
+  // gone from the panel surface — what was once `tasks: GenerationTask[]` is
+  // now resolved locally so the prop signature stops pretending the host
+  // still has a task queue.
+  const tasks: CanvasSkillTask[] = []
   const [projects, setProjects] = useState<ProjectSummary[]>([])
   const [document, setDocument] = useState<CanvasDocument | null>(null)
   const [selectedIds, setSelectedIds] = useState<Set<string>>(() => new Set())
@@ -1254,8 +1263,13 @@ export function CanvasWorkspace(props: CanvasWorkspaceProps): React.JSX.Element 
     if (kind === 'image') { setImageMenu(screen); setBackgroundMenu(null) }
     else { setBackgroundMenu(screen); setImageMenu(null) }
   }, [])
-  const [libraryOpen, setLibraryOpen] = useState(false)
-  const [pickerTab, setPickerTab] = useState<'upload' | 'history' | 'gallery' | 'generate'>('upload')
+  // Round 5: the prompt-template library was a panel feature. The canvas
+  // surface can still hand a prompt off to a fresh text+config pair via
+  // `applyTemplate`, but the host library route + UI overlay are gone.
+  const [libraryOpen] = useState(false)
+  // Round 5: the picker is an upload-only dialog now; history / gallery
+  // came from the host stores that the studio used, and the studio is gone.
+  const [pickerTab, setPickerTab] = useState<'upload'>('upload')
   /** Canvas file nodes: the hidden file input plus the skill catalog overlay. */
   const fileUploadRef = useRef<HTMLInputElement>(null)
   const [fileTargetNodeId, setFileTargetNodeId] = useState<string | null>(null)
@@ -1380,7 +1394,6 @@ export function CanvasWorkspace(props: CanvasWorkspaceProps): React.JSX.Element 
   const [saveState, setSaveState] = useState<'loading' | 'saved' | 'saving' | 'error'>('loading')
   const [error, setError] = useState<string | null>(null)
   const [notice, setNotice] = useState<string | null>(null)
-  const [historyVersion, setHistoryVersion] = useState(0)
 
   // Image-node tools: 标注 (box -> prompt card), 移除背景 (local matting) and
   // 图层拆分 (vision layer plan -> editable nodes).
@@ -1452,7 +1465,9 @@ export function CanvasWorkspace(props: CanvasWorkspaceProps): React.JSX.Element 
     if (pastRef.current[pastRef.current.length - 1] === snapshot) return snapshot
     pastRef.current = [...pastRef.current.slice(-HISTORY_LIMIT), snapshot]
     futureRef.current = []
-    setHistoryVersion(version => version + 1)
+    // Round 5: history-version tick is no longer needed — undo/redo state lives
+// in `pastRef`/`futureRef`, and the canvas rebuilds its commands off that.
+void (0 as unknown)
     return snapshot
   }, [])
 
@@ -1462,7 +1477,9 @@ export function CanvasWorkspace(props: CanvasWorkspaceProps): React.JSX.Element 
     if (current === null || JSON.stringify(current) === snapshot) return
     pastRef.current = [...pastRef.current.slice(-HISTORY_LIMIT), snapshot]
     futureRef.current = []
-    setHistoryVersion(version => version + 1)
+    // Round 5: history-version tick is no longer needed — undo/redo state lives
+// in `pastRef`/`futureRef`, and the canvas rebuilds its commands off that.
+void (0 as unknown)
   }, [])
 
   const updateDocument = useCallback((updater: (previous: CanvasDocument) => CanvasDocument): void => {
@@ -1481,7 +1498,9 @@ export function CanvasWorkspace(props: CanvasWorkspaceProps): React.JSX.Element 
     pastRef.current = pastRef.current.slice(0, -1)
     futureRef.current = [...futureRef.current, JSON.stringify(current)]
     setDocument(JSON.parse(snapshot) as CanvasDocument)
-    setHistoryVersion(version => version + 1)
+    // Round 5: history-version tick is no longer needed — undo/redo state lives
+// in `pastRef`/`futureRef`, and the canvas rebuilds its commands off that.
+void (0 as unknown)
     setSelectedIds(new Set()); setSelectedConnectionId(null)
   }, [])
 
@@ -1492,7 +1511,9 @@ export function CanvasWorkspace(props: CanvasWorkspaceProps): React.JSX.Element 
     futureRef.current = futureRef.current.slice(0, -1)
     pastRef.current = [...pastRef.current.slice(-HISTORY_LIMIT), JSON.stringify(current)]
     setDocument(JSON.parse(snapshot) as CanvasDocument)
-    setHistoryVersion(version => version + 1)
+    // Round 5: history-version tick is no longer needed — undo/redo state lives
+// in `pastRef`/`futureRef`, and the canvas rebuilds its commands off that.
+void (0 as unknown)
     setSelectedIds(new Set()); setSelectedConnectionId(null)
   }, [])
 
@@ -1511,7 +1532,7 @@ export function CanvasWorkspace(props: CanvasWorkspaceProps): React.JSX.Element 
     const size = sizeForAsset(asset)
     const center = position ?? canvasCenter()
     return {
-      id: newId('node'), type: 'image', title: asset.origin === 'gallery' ? tt('canvas.fromGallery') : asset.origin === 'history' ? tt('canvas.fromHistory') : tt('canvas.imageNode'),
+      id: newId('node'), type: 'image', title: asset.origin === 'generated' ? tt('canvas.fromGenerated') : tt('canvas.imageNode'),
       x: Math.round(center.x - size.width / 2), y: Math.round(center.y - size.height / 2),
       width: size.width, height: size.height,
       metadata: { asset, status: 'success' },
@@ -1868,7 +1889,7 @@ export function CanvasWorkspace(props: CanvasWorkspaceProps): React.JSX.Element 
         const image = result.images[index]!
         const dataUrl = `data:${image.mime};base64,${image.b64}`
         const dimensions = await readImageSize(dataUrl)
-        const asset = await api.canvasUpload(dataUrl, dimensions.width, dimensions.height, { origin: 'history' })
+        const asset = await api.canvasUpload(dataUrl, dimensions.width, dimensions.height, { origin: 'generated' })
         const imageNode = createImageNode(asset, { x: baseX + index * (IMAGE_NODE_SIZE.width + 60), y: baseY + index * 40 })
         imageNode.title = `${node.title} #${index + 1}`
         imageNode.metadata = { ...imageNode.metadata, ...(workflowOrigin === undefined ? {} : { workflowOrigin }) }
@@ -2936,254 +2957,34 @@ export function CanvasWorkspace(props: CanvasWorkspaceProps): React.JSX.Element 
 
   // ----------------------------------------------------------- generation
 
-  const submitComposer = useCallback(async (target: CanvasNode | null): Promise<void> => {
-    const current = documentRef.current
-    if (current === null || composerBusy) return
-    if (!connected) { setError(tt('canvas.needApi')); onOpenSettings?.(); return }
-    const inputs = target === null ? [] : upstreamNodes(current, target.id)
-    const referenceImages = inputs.filter(node => node.type === 'image' && usableAsset(node) !== undefined)
-    const upstreamText = inputs
-      .filter(node => node.type === 'text' && nodeMetadata(node).annotation === undefined && (nodeMetadata(node).text ?? '').trim() !== '')
-      .map(node => nodeMetadata(node).text!.trim())
+  // Round 5: the studio's free-form "generate one image" composer is gone —
+  // the host no longer exposes a generation-proxy route. Image creation now
+  // happens exclusively through workflow nodes (text/image ports wired into
+  // a workflow run). Keep the composer UI so the selection affordance still
+  // feels familiar, but pressing send tells the user to use a workflow node.
+  const submitComposer = useCallback(async (_target: CanvasNode | null): Promise<void> => {
     setComposerBusy(true)
     try {
-      // Attached 标注 cards supply both the boxed reference and, when the
-      // composer box is empty, the prompt itself.
-      const annotationPlan = await annotationPlanOf(current, inputs).catch(() => undefined)
-      const prompt = composerPrompt.trim() !== ''
-        ? composerPrompt.trim()
-        : (upstreamText.length > 0 ? upstreamText.join('\n') : (annotationPlan?.texts ?? []).join('\n'))
-      if (prompt === '') { setError(tt('canvas.needPrompt')); setComposerBusy(false); return }
-      const model = imageModels.includes(composerModel) ? composerModel : imageModels[0] ?? ''
-      if (model === '') { setError(tt('canvas.needModel')); setComposerBusy(false); return }
-      const count = Math.min(4, Math.max(1, Math.round(composerCount)))
-      const baseAsset = referenceImages[0] !== undefined ? usableAsset(referenceImages[0]!) : undefined
-      const finalPrompt = annotationPlan === undefined ? prompt : `${prompt}\n\n${annotationPlan.prompt}`
-      let image: string | undefined
-      let images: string[] | undefined
-      let refName: string | undefined
-      if (annotationPlan !== undefined) {
-        image = annotationPlan.image
-        refName = 'canvas-annotated.png'
-      } else if (baseAsset !== undefined) {
-        image = await assetToDataUrl(baseAsset)
-        refName = 'canvas-reference.png'
-        const extras: string[] = []
-        for (const reference of referenceImages.slice(1, 4)) {
-          const asset = usableAsset(reference)
-          if (asset === undefined) continue
-          try { extras.push(await assetToDataUrl(asset)) } catch { /* skip unreadable reference */ }
-        }
-        if (extras.length > 0) images = extras
-      }
-      const footprint = nodeSizeFromRatio(composerSize, IMAGE_NODE_SIZE)
-      const request: GenerateRequest = {
-        mode: image === undefined ? 'text' : 'edit', model, prompt: finalPrompt, size: composerSize, quality: composerQuality, n: count, detail: '',
-        ...(defaultChannelId === undefined ? {} : { channelId: defaultChannelId }),
-        ...(image === undefined ? {} : { image, refName }),
-        ...(images === undefined ? {} : { images }),
-        canvas: {
-          canvasId: current.id,
-          ...(target === null ? {} : {
-            sourceNodeId: annotationPlan?.sourceNodeId ?? referenceImages[0]?.id ?? target.id,
-            parentNodeId: target.id,
-            placement: 'right' as const,
-          }),
-        },
-      }
-      const task = await api.taskSubmit(request)
-      localTaskIds.current.add(task.id)
-      mutate(previous => {
-        const nodes = [...previous.nodes]
-        const connections = [...previous.connections]
-        const anchor = target !== null ? previous.nodes.find(node => node.id === target.id) : undefined
-        const originX = anchor !== undefined ? anchor.x + anchor.width + 80 : Math.round(canvasCenter().x - footprint.width / 2)
-        const originY = anchor !== undefined ? anchor.y : Math.round(canvasCenter().y - footprint.height / 2)
-        for (let index = 0; index < count; index += 1) {
-          const id = newId('node')
-          nodes.push({
-            id, type: 'image', title: tt('canvas.imageNode'),
-            x: Math.round(originX), y: Math.round(originY + index * (footprint.height + 48)),
-            width: footprint.width, height: footprint.height,
-            metadata: {
-              status: 'generating', taskId: task.id,
-              ...(anchor !== undefined ? { sourceNodeId: anchor.id } : {}),
-              ...(annotationPlan === undefined ? {} : { annotationEdit: { sourceNodeId: annotationPlan.sourceNodeId, boxes: annotationPlan.boxes } }),
-              prompt: finalPrompt, model,
-            },
-          })
-          if (anchor !== undefined) connections.push({ id: newId('edge'), fromNodeId: anchor.id, toNodeId: id })
-        }
-        return { ...previous, nodes, connections }
-      })
-      setComposerPrompt('')
-      setError(null)
-    } catch (caught) {
-      setError(caught instanceof Error ? caught.message : String(caught))
+      setError(tt('canvas.useWorkflowNode'))
     } finally {
       setComposerBusy(false)
     }
-  }, [annotationPlanOf, api, canvasCenter, composerBusy, composerCount, composerModel, composerPrompt, composerQuality, composerSize, connected, defaultChannelId, imageModels, mutate, onOpenSettings, upstreamNodes])
+  }, [setError])
 
   // ---------------------------------------------------------- task intake
 
-  /** Re-run a failed image node's generation from its recorded prompt/model,
-   * re-deriving the edit base from the connected source config node. */
-  const retryGeneration = useCallback(async (node: CanvasNode): Promise<void> => {
-    const current = documentRef.current
-    if (current === null || !connected) { setError(tt('canvas.needApi')); onOpenSettings?.(); return }
-    const metadata = nodeMetadata(node)
-    const prompt = (metadata.prompt ?? '').trim()
-    if (prompt === '') { setError(tt('canvas.needPrompt')); return }
-    const model = imageModels.includes(metadata.model ?? '') ? metadata.model! : imageModels[0] ?? ''
-    if (model === '') { setError(tt('canvas.needModel')); return }
-    const sourceId = metadata.sourceNodeId
-    const sourceNode = sourceId === undefined ? undefined : current.nodes.find(item => item.id === sourceId)
-    const directAsset = sourceNode !== undefined && sourceNode.type === 'image' ? usableAsset(sourceNode) : undefined
-    const references = sourceId === undefined ? [] : upstreamNodes(current, sourceId).filter(item => item.type === 'image' && usableAsset(item) !== undefined)
-    const baseAsset = directAsset ?? (references[0] !== undefined ? usableAsset(references[0]!) : undefined)
-    try {
-      let image: string | undefined
-      let images: string[] | undefined
-      let refName: string | undefined
-      // A 标注 edit rebuilds its marked reference so the retry stays boxed.
-      const boxes = sourceNode === undefined || sourceNode.type !== 'image' ? [] : liveAnnotations(sourceNode, current.nodes).flatMap(annotation => {
-        const textNode = current.nodes.find(item => item.id === annotation.nodeId)
-        const text = (textNode === undefined ? '' : nodeMetadata(textNode).text ?? '').trim()
-        return text === '' ? [] : [{ rect: { x: annotation.x, y: annotation.y, width: annotation.width, height: annotation.height }, text }]
-      })
-      const annotated = sourceNode !== undefined && baseAsset !== undefined && boxes.length > 0
-        ? await annotatedReference(sourceNode, boxes).catch(() => undefined)
-        : undefined
-      if (annotated !== undefined) {
-        image = annotated.image
-        refName = 'canvas-annotated.png'
-      } else if (baseAsset !== undefined) {
-        image = await assetToDataUrl(baseAsset)
-        refName = 'canvas-reference.png'
-        const extras: string[] = []
-        for (const reference of references.slice(1, 4)) {
-          const asset = usableAsset(reference)
-          if (asset === undefined) continue
-          try { extras.push(await assetToDataUrl(asset)) } catch { /* skip unreadable reference */ }
-        }
-        if (extras.length > 0) images = extras
-      }
-      const request: GenerateRequest = {
-        mode: image === undefined ? 'text' : 'edit', model, prompt, size: metadata.size ?? 'auto', quality: metadata.quality ?? 'auto', n: 1, detail: '',
-        ...(defaultChannelId === undefined ? {} : { channelId: defaultChannelId }),
-        ...(image === undefined ? {} : { image, refName }),
-        ...(images === undefined ? {} : { images }),
-        canvas: { canvasId: current.id, sourceNodeId: sourceId ?? references[0]?.id, parentNodeId: node.id, placement: 'right' as const },
-      }
-      const task = await api.taskSubmit(request)
-      localTaskIds.current.add(task.id)
-      patchNode(node.id, {
-        status: 'generating', error: undefined, taskId: task.id,
-        // Remember the boxes so the finished image can be composited back onto
-        // the clean original (the marker must not survive into the result).
-        ...(annotated !== undefined && sourceNode !== undefined
-          ? { annotationEdit: { sourceNodeId: sourceNode.id, boxes: boxes.map(box => box.rect) } }
-          : {}),
-      })
-      setError(null)
-    } catch (caught) {
-      setError(caught instanceof Error ? caught.message : String(caught))
-    }
-  }, [annotatedReference, api, connected, defaultChannelId, imageModels, onOpenSettings, patchNode, upstreamNodes])
+  // Round 5: same story as `submitComposer`. Image-node retries were tied to
+  // the deleted generation proxy; the workflow node already exposes a "重新
+  // 生成" affordance for its own outputs, and that path still works.
+  const retryGeneration = useCallback((_node: CanvasNode): void => {
+    setError(tt('canvas.useWorkflowNode'))
+  }, [setError])
 
-  // Orphan reconciliation: a generating placeholder whose task no longer exists
-  // in the host feed (e.g. the host restarted) can never complete on its own.
-  useEffect(() => {
-    if (document === null) return
-    const feedFresh = tasks.length > 0 || Date.now() - mountedAtRef.current > 8000
-    if (!feedFresh) return
-    const feedIds = new Set(tasks.map(task => task.id))
-    const orphans = document.nodes.filter(node => {
-      if (node.type !== 'image' || nodeMetadata(node).status !== 'generating') return false
-      const taskId = nodeMetadata(node).taskId
-      return taskId !== undefined && !feedIds.has(taskId) && !localTaskIds.current.has(taskId)
-    })
-    if (orphans.length === 0) return
-    updateNodes(nodes => nodes.map(node => {
-      const taskId = node.type === 'image' ? nodeMetadata(node).taskId : undefined
-      if (node.type !== 'image' || nodeMetadata(node).status !== 'generating' || taskId === undefined
-        || feedIds.has(taskId) || localTaskIds.current.has(taskId)) return node
-      return { ...node, metadata: { ...nodeMetadata(node), status: 'error', error: tt('canvas.taskLost') } }
-    }))
-  }, [document, tasks, updateNodes])
-
-  useEffect(() => {
-    if (document === null) return
-    const canvasTasks = tasks.filter(task => task.request.canvas?.canvasId === document.id)
-    for (const task of canvasTasks) {
-      if (task.status !== 'completed' && task.status !== 'failed' && task.status !== 'cancelled') continue
-      if (processedTasks.current.has(task.id)) continue
-      const targets = document.nodes.filter(node => node.type === 'image' && nodeMetadata(node).taskId === task.id && nodeMetadata(node).status === 'generating')
-      if (targets.length === 0) continue
-      processedTasks.current.add(task.id)
-      const sourceId = nodeMetadata(targets[0]!).sourceNodeId
-      const fail = (message: string): void => {
-        updateNodes(nodes => nodes.map(node => node.type === 'image' && nodeMetadata(node).taskId === task.id && nodeMetadata(node).status === 'generating'
-          ? { ...node, metadata: { ...nodeMetadata(node), status: 'error', error: message } }
-          : node))
-      }
-      if (task.status !== 'completed' || task.result === undefined || task.result.images.length === 0) {
-        fail(task.error ?? tt('canvas.generateFailed'))
-        continue
-      }
-      void (async () => {
-        const assets: CanvasAssetRef[] = []
-        const annotationEdit = nodeMetadata(targets[0]!).annotationEdit
-        const originalAsset = annotationEdit === undefined
-          ? undefined
-          : usableAsset(document.nodes.find(node => node.id === annotationEdit.sourceNodeId) ?? targets[0]!)
-        for (const image of task.result!.images) {
-          let dataUrl = imageDataUrl(image)
-          // A 标注 edit: keep the generated pixels only inside the boxes and
-          // restore the clean original everywhere else, so the red marker the
-          // model may have echoed never reaches the finished image.
-          if (annotationEdit !== undefined && originalAsset !== undefined) {
-            try {
-              const result = await loadRaster(dataUrl, 4096)
-              const original = await loadRaster(originalAsset.url, 4096)
-              const inset = Math.max(2, Math.round(Math.min(result.width, result.height) * 0.01))
-              dataUrl = canvasToDataUrl(compositeAnnotatedResult(result, original, annotationEdit.boxes, inset))
-            } catch { /* keep the raw result if the composite cannot be built */ }
-          }
-          const dimensions = await readImageSize(dataUrl)
-          assets.push(await api.canvasUpload(dataUrl, dimensions.width, dimensions.height, { origin: 'generated', originId: task.id }))
-        }
-        updateDocument(previous => {
-          const ordered = previous.nodes.filter(node => node.type === 'image' && nodeMetadata(node).taskId === task.id && nodeMetadata(node).status === 'generating')
-          if (ordered.length === 0) return previous
-          const last = ordered[ordered.length - 1]!
-          const nodes = previous.nodes.map(node => {
-            const index = ordered.indexOf(node)
-            if (index < 0) return node
-            const asset = assets[index]
-            return asset === undefined
-              ? { ...node, metadata: { ...nodeMetadata(node), status: 'error' as const, error: tt('canvas.generateFailed') } }
-              : { ...node, metadata: { ...nodeMetadata(node), asset, status: 'success' as const, error: undefined } }
-          })
-          // More results than placeholders: append sibling nodes below the last one.
-          const siblings: CanvasNode[] = []
-          const connections: CanvasConnection[] = []
-          assets.slice(ordered.length).forEach((asset, offset) => {
-            const id = newId('node')
-            siblings.push({
-              id, type: 'image', title: tt('canvas.imageNode'),
-              x: Math.round(last.x), y: Math.round(last.y + (ordered.length + offset) * (last.height + 48)),
-              width: last.width, height: last.height,
-              metadata: { status: 'success', asset, taskId: task.id, ...(sourceId === undefined ? {} : { sourceNodeId: sourceId }) },
-            })
-            if (sourceId !== undefined) connections.push({ id: newId('edge'), fromNodeId: sourceId, toNodeId: id })
-          })
-          return { ...previous, nodes: [...nodes, ...siblings], connections: [...previous.connections, ...connections] }
-        })
-      })().catch(caught => fail(caught instanceof Error ? caught.message : String(caught)))
-    }
-  }, [api, document, tasks, updateDocument, updateNodes])
+  // Round 5: orphan reconciliation and per-task result reconciliation both
+  // belonged to the studio's free-form generation feed. The host no longer
+  // publishes one, the local `tasks` array is always empty, and image-node
+  // status that lingers on 'generating' can only come from a workflow run
+  // (which owns its own reconcile path). Nothing to do here.
 
   // ------------------------------------------------------- import intake
 
@@ -3200,34 +3001,8 @@ export function CanvasWorkspace(props: CanvasWorkspaceProps): React.JSX.Element 
     setSelectedIds(new Set())
   }, [canvasCenter, createImageNode, mutate])
 
-  useEffect(() => {
-    if (importRequest === undefined) {
-      processedImport.current = ''
-      return
-    }
-    if (document === null) return
-    const requestKey = `${importRequest.source}:${importRequest.entryId}:${importRequest.imageIndex}`
-    if (processedImport.current === requestKey) return
-    const sourceEntries = importRequest.source === 'history' ? history : gallery
-    const entry = sourceEntries.find(item => item.id === importRequest.entryId)
-    const image = entry?.images[importRequest.imageIndex]
-    if (entry === undefined || image === undefined) {
-      processedImport.current = requestKey
-      onImportRequestHandled?.()
-      return
-    }
-    processedImport.current = requestKey
-    void (async () => {
-      const dimensions = await readImageSize(image.url)
-      const asset = await api.canvasImport(importRequest.source, importRequest.entryId, importRequest.imageIndex, dimensions.width, dimensions.height)
-      addAssets([asset])
-      onImportRequestHandled?.()
-    })().catch(caught => {
-      setError(caught instanceof Error ? caught.message : String(caught))
-      onImportRequestHandled?.()
-    })
-  }, [addAssets, api, document, gallery, history, importRequest, onImportRequestHandled])
-
+  // Round 5: the legacy "import a history / gallery image into the canvas"
+  // path is gone (those stores live on the host now only as empty shells).
   // -------------------------------------------------------------- loading
 
   useEffect(() => {
@@ -3862,7 +3637,9 @@ export function CanvasWorkspace(props: CanvasWorkspaceProps): React.JSX.Element 
       setProjects(previous => [summaryOf(next), ...previous])
       setDocument(next); setSelectedIds(new Set()); setSelectedConnectionId(null)
       syncedRef.current = JSON.stringify(created); setSaveState('saved')
-      pastRef.current = []; futureRef.current = []; setHistoryVersion(version => version + 1)
+      pastRef.current = []; futureRef.current = []; // Round 5: history-version tick is no longer needed — undo/redo state lives
+// in `pastRef`/`futureRef`, and the canvas rebuilds its commands off that.
+void (0 as unknown)
     } catch (caught) { setError(caught instanceof Error ? caught.message : String(caught)) }
   }, [api, seedDocument])
 
@@ -3871,7 +3648,9 @@ export function CanvasWorkspace(props: CanvasWorkspaceProps): React.JSX.Element 
       const next = await api.canvasRead(id)
       setDocument(normalizeConfigNodeSizes(next)); setSelectedIds(new Set()); setSelectedConnectionId(null)
       syncedRef.current = JSON.stringify(next); setSaveState('saved')
-      pastRef.current = []; futureRef.current = []; setHistoryVersion(version => version + 1)
+      pastRef.current = []; futureRef.current = []; // Round 5: history-version tick is no longer needed — undo/redo state lives
+// in `pastRef`/`futureRef`, and the canvas rebuilds its commands off that.
+void (0 as unknown)
     } catch (caught) { setError(caught instanceof Error ? caught.message : String(caught)) }
   }, [api])
 
@@ -4410,8 +4189,8 @@ export function CanvasWorkspace(props: CanvasWorkspaceProps): React.JSX.Element 
             ? `${layerKindLabel(metadata.layer.kind)} · ${metadata.layer.label}`
             : metadata.model !== undefined && metadata.model !== ''
               ? metadata.model
-              : asset.origin === 'gallery' || asset.origin === 'history'
-                ? (asset.origin === 'gallery' ? tt('canvas.fromGallery') : tt('canvas.fromHistory'))
+              : asset.origin === 'generated'
+                ? tt('canvas.fromGenerated')
                 : ''}
         </span>
         {asset.width > 1 ? <span className={css.imageFooterSize}>{asset.width}×{asset.height}</span> : null}
@@ -5091,9 +4870,6 @@ export function CanvasWorkspace(props: CanvasWorkspaceProps): React.JSX.Element 
             openWorkflowPicker(undefined, { x: rect.left + rect.width / 2, y: rect.top })
           }} />
         </div> : null}
-        <div className={css.dockItem} data-dock-item="" data-label={tt('canvas.templateLibrary')}>
-          <IconButton name="template" size={18} label={tt('canvas.templateLibrary')} active={libraryOpen} onClick={() => setLibraryOpen(previous => !previous)} />
-        </div>
         <div className={css.dockItem} data-dock-item="" data-label={tt('canvas.skills.libraryButton')}>
           <IconButton
             name="skill"
@@ -5137,9 +4913,6 @@ export function CanvasWorkspace(props: CanvasWorkspaceProps): React.JSX.Element 
       onMouseLeave={scheduleMenuClose}
     >
       <button type="button" role="menuitem" onClick={() => { imageFileRef.current?.click(); setImageMenu(null) }}>{tt('canvas.imageMenuUpload')}</button>
-      <button type="button" role="menuitem" onClick={() => { setPickerTab('gallery'); setPickerOpen(true); setImageMenu(null) }}>{tt('canvas.imageMenuAssets')}</button>
-      <button type="button" role="menuitem" onClick={() => { setPickerTab('history'); setPickerOpen(true); setImageMenu(null) }}>{tt('canvas.imageMenuHistory')}</button>
-      <button type="button" role="menuitem" onClick={() => { setPickerTab('generate'); setPickerOpen(true); setImageMenu(null) }}>{tt('canvas.imageMenuGenerate')}</button>
     </div> : null}
     <input
       ref={imageFileRef}
@@ -5305,7 +5078,10 @@ export function CanvasWorkspace(props: CanvasWorkspaceProps): React.JSX.Element 
       title={filePreviewNode.node.title}
       onClose={() => setFilePreviewNodeId(null)}
     /> : null}
-    {libraryOpen ? <TemplateLibrary api={api} onClose={() => setLibraryOpen(false)} onUse={applyTemplate} /> : null}
+    {/* Round 5: the prompt-template library overlay was a panel feature.
+        The host no longer exposes a template-library route; the icon and
+        dialog are gone. `applyTemplate` still works for any caller that
+        wants to drop a ready-made prompt into a text+config pair. */}
     {skillLibraryOpen ? <SkillLibraryDialog
       library={skillLibrary}
       loading={libraryLoading}
@@ -5330,8 +5106,6 @@ export function CanvasWorkspace(props: CanvasWorkspaceProps): React.JSX.Element 
 
     {pickerOpen ? <ImagePicker
       api={api}
-      history={history}
-      gallery={gallery}
       imageModels={imageModels}
       defaultChannelId={defaultChannelId}
       canvasId={document?.id ?? ''}
@@ -5339,19 +5113,6 @@ export function CanvasWorkspace(props: CanvasWorkspaceProps): React.JSX.Element 
       initialTab={pickerTab}
       onClose={() => setPickerOpen(false)}
       onAssets={assets => { addAssets(assets); setPickerOpen(false) }}
-      onTask={task => {
-        if (document === null) return
-        const center = canvasCenter()
-        const size = nodeSizeFromRatio(task.request.size, IMAGE_NODE_SIZE)
-        const node: CanvasNode = {
-          id: newId('node'), type: 'image', title: tt('canvas.imageNode'),
-          x: Math.round(center.x - size.width / 2), y: Math.round(center.y - size.height / 2),
-          width: size.width, height: size.height,
-          metadata: { status: 'generating', prompt: task.request.prompt, model: task.request.model, size: task.request.size, quality: task.request.quality, taskId: task.id, sourceNodeId: task.request.canvas?.sourceNodeId },
-        }
-        placeNewNode(node)
-        setPickerOpen(false)
-      }}
     /> : null}
   </section>
 }
@@ -5590,28 +5351,16 @@ function SketchBoard(props: {
 
 function ImagePicker(props: {
   api: ImageGenApi
-  history: HistoryEntry[]
-  gallery: HistoryEntry[]
   imageModels: string[]
   defaultChannelId?: string
   canvasId: string
   connected: boolean
-  initialTab?: 'upload' | 'history' | 'gallery' | 'generate'
+  initialTab?: 'upload'
   onClose: () => void
   onAssets: (assets: CanvasAssetRef[]) => void
-  onTask: (task: GenerationTask) => void
 }): React.JSX.Element {
-  const { api, history, gallery, imageModels, defaultChannelId, canvasId, connected, onClose, onAssets } = props
-  const [tab, setTab] = useState<'upload' | 'history' | 'gallery' | 'generate'>(props.initialTab ?? 'upload')
-  const [selected, setSelected] = useState<string[]>([])
-  const [dimensions, setDimensions] = useState<Record<string, { width: number; height: number }>>({})
-  const [prompt, setPrompt] = useState('')
-  const [model, setModel] = useState(imageModels[0] ?? '')
-  const [size, setSize] = useState('auto')
-  const [quality, setQuality] = useState('auto')
+  const { api, onClose, onAssets } = props
   const [busy, setBusy] = useState(false)
-  const toggle = (key: string): void => setSelected(previous => previous.includes(key) ? previous.filter(item => item !== key) : [...previous, key])
-  const items = (tab === 'history' ? history : gallery).flatMap(entry => entry.images.map((image, index) => ({ key: `${entry.id}:${index}`, entry, image, index })))
   const uploadFiles = (files: File[]): void => {
     setBusy(true)
     void Promise.all(files.map(async file => {
@@ -5620,34 +5369,10 @@ function ImagePicker(props: {
       return api.canvasUpload(dataUrl, sizeOf.width, sizeOf.height, { origin: 'upload', originId: file.name })
     })).then(assets => { onAssets(assets) }).catch(() => {}).finally(() => setBusy(false))
   }
-  const addSelected = async (): Promise<void> => {
-    setBusy(true)
-    try {
-      const assets: CanvasAssetRef[] = []
-      for (const key of selected) {
-        const [entryId, indexText] = key.split(':'); const index = Number(indexText); const item = items.find(candidate => candidate.key === key)
-        if (entryId === undefined || item === undefined) continue
-        const sizeOf = dimensions[key] ?? await readImageSize(item.image.url).catch(() => ({ width: 1024, height: 1024 }))
-        assets.push(await api.canvasImport(tab === 'history' ? 'history' : 'gallery', entryId, index, sizeOf.width, sizeOf.height))
-      }
-      if (assets.length > 0) onAssets(assets)
-    } finally { setBusy(false) }
-  }
-  const generate = async (): Promise<void> => {
-    if (!connected || prompt.trim() === '') return
-    setBusy(true)
-    try {
-      const task = await api.taskSubmit({ mode: 'text', model, prompt: prompt.trim(), size, quality, n: 1, detail: '', ...(defaultChannelId === undefined ? {} : { channelId: defaultChannelId }), canvas: { canvasId } })
-      props.onTask(task)
-    } finally { setBusy(false) }
-  }
   return <div className={css.modalBackdrop} role="dialog" aria-modal="true" data-canvas-no-zoom=""><section className={css.picker}>
     <header className={css.pickerHeader}><strong>{tt('canvas.addImage')}</strong><button type="button" aria-label={tt('canvas.close')} title={tt('canvas.close')} onClick={onClose}>×</button></header>
-    <nav className={css.pickerTabs} role="tablist">{(['upload', 'history', 'gallery', 'generate'] as const).map(item => <button key={item} type="button" role="tab" aria-selected={tab === item} data-active={tab === item ? '' : undefined} onClick={() => { setTab(item); setSelected([]) }}>{item === 'upload' ? tt('canvas.tabUpload') : item === 'history' ? tt('canvas.tabHistory') : item === 'gallery' ? tt('canvas.tabGallery') : tt('canvas.tabGenerate')}</button>)}</nav>
     <div className={css.pickerBody}>
-      {tab === 'upload' ? <label className={css.uploadBox} onDragOver={event => event.preventDefault()} onDrop={event => { event.preventDefault(); const files = [...(event.dataTransfer.files ?? [])].filter(file => file.type.startsWith('image/')); if (files.length === 0) return; uploadFiles(files) }}><input type="file" accept="image/png,image/jpeg,image/webp,image/gif" multiple disabled={busy} onChange={event => { const files = [...(event.target.files ?? [])]; if (files.length > 0) uploadFiles(files) }} /><span className={css.uploadIcon}><ToolbarIcon name="image" /></span><strong>{tt('canvas.dropHint')}</strong><small>{tt('canvas.dropSub')}</small></label> : null}
-      {(tab === 'history' || tab === 'gallery') ? <><div className={css.pickerGrid}>{items.map(item => <button key={item.key} type="button" role="option" aria-selected={selected.includes(item.key)} className={css.pickerCard} data-selected={selected.includes(item.key) ? '' : undefined} onClick={() => toggle(item.key)}><img draggable={false} src={item.image.url} alt={item.entry.prompt} onLoad={event => { const image = event.currentTarget; setDimensions(previous => ({ ...previous, [item.key]: { width: image.naturalWidth || 1, height: image.naturalHeight || 1 } })) }} /><span className={css.pickerCardPrompt}>{item.entry.prompt || tt('canvas.untitledWork')}</span><small>{item.entry.model} · {item.index + 1}/{item.entry.images.length}</small></button>)}</div><footer className={css.pickerFooter}><span>{tt('canvas.picked', { count: selected.length })}</span><button type="button" disabled={busy || selected.length === 0} onClick={() => { void addSelected() }}>{tt('canvas.addToCanvas')}</button></footer></> : null}
-      {tab === 'generate' ? <div className={css.generateForm}><textarea value={prompt} onChange={event => setPrompt(event.target.value)} placeholder={tt('canvas.composerPlaceholder')} /><ComposerSelect value={model} options={imageModels.map(item => ({ value: item, label: item }))} ariaLabel={tt('canvas.model')} onChange={setModel} /><div className={css.inspectorRow}><ComposerSelect value={size} options={[{ value: 'auto', label: tt('canvas.sizeAuto') }, { value: '1:1', label: '1:1' }, { value: '3:4', label: '3:4' }, { value: '16:9', label: '16:9' }, { value: '9:16', label: '9:16' }]} ariaLabel={tt('canvas.size')} onChange={setSize} /><ComposerSelect value={quality} options={[{ value: 'auto', label: tt('canvas.qualityAuto') }, { value: '1k', label: '1K' }, { value: '2k', label: '2K' }, { value: '4k', label: '4K' }]} ariaLabel={tt('canvas.quality')} onChange={setQuality} /></div><button type="button" disabled={!connected || busy || prompt.trim() === ''} onClick={() => { void generate() }}><ToolbarIcon name="sparkle" />{tt('canvas.generateAndAdd')}</button>{!connected ? <small>{tt('canvas.needApi')}</small> : null}</div> : null}
+      <label className={css.uploadBox} onDragOver={event => event.preventDefault()} onDrop={event => { event.preventDefault(); const files = [...(event.dataTransfer.files ?? [])].filter(file => file.type.startsWith('image/')); if (files.length === 0) return; uploadFiles(files) }}><input type="file" accept="image/png,image/jpeg,image/webp,image/gif" multiple disabled={busy} onChange={event => { const files = [...(event.target.files ?? [])]; if (files.length > 0) uploadFiles(files) }} /><span className={css.uploadIcon}><ToolbarIcon name="image" /></span><strong>{tt('canvas.dropHint')}</strong><small>{tt('canvas.dropSub')}</small></label>
     </div>
   </section></div>
 }

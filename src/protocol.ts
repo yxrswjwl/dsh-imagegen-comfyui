@@ -1,13 +1,18 @@
 /**
  * Wire contract shared by the host and client halves of dsh-imagegen: the
- * settings namespace, the route paths, and the generate payload/result shapes.
- * Pure types + constants 鈥?safe for the client bundle to inline.
+ * settings namespace, the route paths the canvas needs, and the canvas node
+ * graph payload shape. Pure types + constants — safe for the client bundle
+ * to inline.
+ *
+ * Round 5: the panel/ecommerce/generation-studio surfaces were removed.
+ * What stays is what the infinite canvas actually needs to render, link,
+ * run a ComfyUI workflow node, and talk to the host about skills + assets.
  */
 
 /** Settings namespace this plugin owns (host settings seam + bridge). */
 export const IMAGEGEN_SETTINGS_NAMESPACE = 'dsh-imagegen'
 
-/** Published package version shared by the host updater and the client UI. */
+/** Published package version shared by the host settings card and the client. */
 export const PLUGIN_VERSION = '1.5.14'
 
 /** Same-origin route family (loopback-only, mirroring the dsh-ssh fence). */
@@ -16,18 +21,30 @@ export const SETTINGS_API = {
   mutate: '/api/dsh-imagegen/settings/mutate',
 } as const
 
-/** The image-generation proxy route. */
-export const GENERATE_API = '/api/dsh-imagegen/generate'
+/** Host-mediated candidate discovery for the configured image API. */
+export const IMAGE_MODEL_API = {
+  models: '/api/dsh-imagegen/image-models',
+} as const
 
-/** Host-mediated OpenAI-compatible prompt enhancement endpoints. */
+/** Host-mediated OpenAI-compatible prompt enhancement endpoints. Kept as
+ *  route constants so the settings card's prompt-model probe still
+ *  type-checks; the host routes were removed in Round 5 and the probes
+ *  now 404. */
 export const PROMPT_ENHANCE_API = {
   models: '/api/dsh-imagegen/prompt-enhance/models',
   enhance: '/api/dsh-imagegen/prompt-enhance',
 } as const
 
-/** Host-mediated candidate discovery for the configured image API. */
-export const IMAGE_MODEL_API = {
-  models: '/api/dsh-imagegen/image-models',
+/** Host-computed per-channel usage counters. Kept as a route constant for
+ *  the settings card type; the host route is gone in Round 5. */
+export const USAGE_API = '/api/dsh-imagegen/usage' as const
+
+/** Reveal the host data directory (saved images) in the OS file manager. */
+export const DATA_FOLDER_API = '/api/dsh-imagegen/data-folder/open' as const
+
+/** Probe the configured S3-compatible object storage. */
+export const STORAGE_API = {
+  test: '/api/dsh-imagegen/storage/test',
 } as const
 
 /** One workflow entry as the browser consumes it (ComfyUI: folder-grouped listing). */
@@ -74,69 +91,6 @@ export interface ComfyUiProbeResult {
 /** Host-served built-in provider catalog (channels the user can instantiate). */
 export const PRESETS_API = '/api/dsh-imagegen/presets' as const
 
-/** Loopback-only image reader for Agent tool-result previews. */
-export const AGENT_IMAGE_API = '/api/dsh-imagegen/agent-image' as const
-
-/** Store the current composer image for the direct edit_image command. */
-export const CONVERSATION_IMAGE_API = '/api/dsh-imagegen/conversation-image' as const
-
-/**
- * Host-computed per-channel usage counters (generation-count badges in the
- * settings card): entries are tallied from the persisted history and gallery
- * by channel + model alias.
- */
-export const USAGE_API = '/api/dsh-imagegen/usage' as const
-
-/** Host-resident generation queue endpoints. */
-export const TASK_API = {
-  submit: '/api/dsh-imagegen/tasks/submit',
-  list: '/api/dsh-imagegen/tasks/list',
-  cancel: '/api/dsh-imagegen/tasks/cancel',
-  retry: '/api/dsh-imagegen/tasks/retry',
-} as const
-
-/** Reveal the host data directory (saved images) in the OS file manager. */
-export const DATA_FOLDER_API = '/api/dsh-imagegen/data-folder/open' as const
-
-/** Probe the configured S3-compatible object storage. */
-export const STORAGE_API = {
-  test: '/api/dsh-imagegen/storage/test',
-} as const
-
-/** Host-mediated GitHub Release update routes. */
-export const UPDATE_API = {
-  check: '/api/dsh-imagegen/update/check',
-  apply: '/api/dsh-imagegen/update/apply',
-} as const
-
-/**
- * Same-origin route family for the host-persisted generation history. Images
- * live as files under ~/.dsh/dsh-imagegen/images/ and are served back through
- * the `image` prefix route, so list responses carry metadata only (never
- * base64) and the browser loads thumbnails/previews lazily.
- */
-export const HISTORY_API = {
-  list: '/api/dsh-imagegen/history/list',
-  append: '/api/dsh-imagegen/history/append',
-  remove: '/api/dsh-imagegen/history/remove',
-  clear: '/api/dsh-imagegen/history/clear',
-  image: '/api/dsh-imagegen/history/image',
-} as const
-
-/**
- * Same-origin route family for the user-curated gallery (favorites). Entries
- * reuse the history wire shape and persist under ~/.dsh/dsh-imagegen/gallery/;
- * unlike history there is no size cap 鈥?the user adds images on purpose.
- */
-export const GALLERY_API = {
-  list: '/api/dsh-imagegen/gallery/list',
-  append: '/api/dsh-imagegen/gallery/append',
-  remove: '/api/dsh-imagegen/gallery/remove',
-  clear: '/api/dsh-imagegen/gallery/clear',
-  tags: '/api/dsh-imagegen/gallery/tags',
-  image: '/api/dsh-imagegen/gallery/image',
-} as const
-
 /** Host-persisted infinite canvas projects and their content-addressed assets. */
 export const CANVAS_API = {
   list: '/api/dsh-imagegen/canvas/list',
@@ -145,7 +99,6 @@ export const CANVAS_API = {
   save: '/api/dsh-imagegen/canvas/save',
   remove: '/api/dsh-imagegen/canvas/remove',
   assetUpload: '/api/dsh-imagegen/canvas/asset/upload',
-  assetImport: '/api/dsh-imagegen/canvas/asset/import',
   asset: '/api/dsh-imagegen/canvas/asset',
   /** Vision-model layer decomposition for the canvas layer-split tool. */
   layers: '/api/dsh-imagegen/canvas/layers',
@@ -158,8 +111,8 @@ export const CANVAS_API = {
    *  with the right connectors and advanced options. */
   workflowInspect: '/api/dsh-imagegen/canvas/workflow/inspect',
   /** Run a workflow node: collects connected text/image inputs, injects them
-   *  into the workflow JSON, submits to ComfyUI, and returns a task id the
-   *  client can poll for status / outputs. Round 4 entry point. */
+   *  into the workflow JSON, submits to ComfyUI, and returns the resulting
+   *  images so the canvas can place them as new nodes. Round 4 entry point. */
   runWorkflow: '/api/dsh-imagegen/canvas/workflow/run',
   /** Live ComfyUI progress for one workflow node's most recent run
    *  (`?workflowNodeId=…`). Returns `{ ok, running, progress, node }`.
@@ -184,154 +137,6 @@ export const CANVAS_SKILL_API = {
   configApply: '/api/dsh-imagegen/canvas/skills/config/apply',
 } as const
 
-/** Maximum number of history entries retained host-side (oldest evicted). */
-export const HISTORY_MAX = 50
-
-/**
- * Same-origin route family for the prompt-template libraries. The library is
- * multi-source: every request names a source id from {@link TEMPLATE_SOURCES},
- * each source keeps an independent snapshot/image cache host-side, and
- * reference images are proxied through the source-scoped `image` prefix route
- * (`…/image/<sourceId>/<file>`) and cached on disk so repeated views never hit
- * the network again.
- */
-export const TEMPLATES_API = {
-  list: '/api/dsh-imagegen/templates/list',
-  refresh: '/api/dsh-imagegen/templates/refresh',
-  sample: '/api/dsh-imagegen/templates/sample',
-  image: '/api/dsh-imagegen/templates/image',
-} as const
-
-/** Same-origin route family for the user's saved (favorited) templates. */
-export const TEMPLATE_FAVORITES_API = {
-  list: '/api/dsh-imagegen/templates/favorites/list',
-  add: '/api/dsh-imagegen/templates/favorites/add',
-  remove: '/api/dsh-imagegen/templates/favorites/remove',
-} as const
-
-/** One prompt-template library source (a tab in the library overlay). */
-export interface TemplateSourceMeta {
-  /** Stable source id: snapshot dir name, image-cache dir, and request key. */
-  id: string
-  /** Tab label shown in the library overlay. */
-  label: string
-  /** Source homepage linked in the overlay footer. */
-  homepage: string
-  /** One-line description of the source (tab tooltip). */
-  description: string
-}
-
-/**
- * The template-library source registry. Each entry is fully independent (own
- * upstream JSON, own image pool, own refresh state) and renders as its own
- * tab; adding a source later means appending an entry here plus a host-side
- * fetch definition in templates-store.ts and an optional bundled snapshot.
- */
-export const TEMPLATE_SOURCES: TemplateSourceMeta[] = [
-  {
-    id: 'vibeui',
-    label: '精选案例库',
-    homepage: 'https://vibeui.top/',
-    description: 'awesome-gpt-image-2 精选提示词案例（vibeui.top 镜像）',
-  },
-  {
-    id: 'canghe',
-    label: '沧河案例库',
-    homepage: 'https://gpt-image2.canghe.ai/',
-    description: 'GPT-Image2 Prompt Gallery（gpt-image2.canghe.ai，定期更新）',
-  },
-]
-
-/** Default source id when a request does not name one (legacy clients). */
-export const DEFAULT_TEMPLATE_SOURCE_ID = TEMPLATE_SOURCES[0]!.id
-
-/** True when the id names a registered template source. */
-export function isTemplateSourceId(id: string): boolean {
-  return TEMPLATE_SOURCES.some(source => source.id === id)
-}
-
-/** One prompt-library case as the browser consumes it. */
-export interface TemplateCase {
-  /** Upstream case number (stable across refreshes). */
-  id: number
-  /** Short case title. */
-  title: string
-  /** Full reusable prompt text. */
-  prompt: string
-  /** English category name (grouping key). */
-  category: string
-  /** Chinese category display name. */
-  categoryZh: string
-  /** Style tags. */
-  styles: string[]
-  /** Scene tags. */
-  scenes: string[]
-  /** Original author handle, e.g. @vista8. */
-  sourceLabel: string
-  /** Original author link. */
-  sourceUrl: string
-  /** awesome-gpt-image-2 repo anchor link. */
-  githubUrl: string
-  /** Reference-image file name served through the image route ('' when none). */
-  image: string
-  /** Whether the source gallery featured the case. */
-  featured: boolean
-}
-
-/** Template-library list payload (one source). */
-export interface TemplateListResult {
-  /** The source this list belongs to. */
-  sourceId: string
-  cases: TemplateCase[]
-  total: number
-  /** Where the served list came from. */
-  origin: 'bundled' | 'refreshed'
-  /** Upstream repository the library mirrors. */
-  repository: string
-  /** ISO time of the last successful refresh / bundle snapshot. */
-  fetchedAt: string
-}
-
-/** Template-library refresh outcome (one source). */
-export interface TemplateRefreshResult {
-  sourceId: string
-  total: number
-  fetchedAt: string
-}
-
-/** One random inspiration pick served to the studio's empty state. */
-export interface TemplateSample {
-  /** Source the case came from (drives the image proxy URL). */
-  sourceId: string
-  /** The sampled case (full prompt is handed to the form on use). */
-  case: TemplateCase
-}
-
-/** One favorited template as persisted host-side and served to the browser. */
-export interface TemplateFavorite {
-  /** Stable key: `${sourceId}:${caseId}`. */
-  key: string
-  /** Source the case came from. */
-  sourceId: string
-  /** ISO time the favorite was saved. */
-  savedAt: string
-  /** Full case snapshot, so favorites survive upstream list churn. */
-  case: TemplateCase
-}
-
-/** Generation modes. */
-export type GenerateMode = 'text' | 'edit'
-
-/** Origin information carried by a generation started from the canvas. */
-export interface CanvasTaskMeta {
-  canvasId: string
-  sourceNodeId?: string
-  /** Legacy v1 annotation workflow; kept so old history entries still parse. */
-  annotationNodeId?: string
-  parentNodeId?: string
-  placement?: 'right' | 'below'
-}
-
 /** One image or file asset referenced by a canvas node. Image assets always
  *  carry real dimensions; file assets may report `0` (nothing to preview). */
 export interface CanvasAssetRef {
@@ -341,7 +146,7 @@ export interface CanvasAssetRef {
   bytes: number
   width: number
   height: number
-  origin: 'upload' | 'history' | 'gallery' | 'generated'
+  origin: 'upload' | 'generated'
   originId?: string
   entryId?: string
   imageIndex?: number
@@ -951,6 +756,76 @@ export interface CanvasSummary {
   updatedAt: number
 }
 
+/**
+ * Generation request the canvas workflow runner hands to the host. Kept
+ * narrowly typed: only what ComfyUI workflow runs need (text mode, optional
+ * image slots, per-widget overrides, canvas lineage).
+ */
+export interface CanvasGenerateRequest {
+  mode: 'text'
+  model: string
+  prompt: string
+  size: string
+  quality: string
+  n: number
+  detail: string
+  /** Canvas workflow image inputs. Each entry names the workflow node +
+   *  input to fill (`LoadImage.image` and other string image widgets) and
+   *  carries the canvas image as a data URL. The host uploads each image to
+   *  ComfyUI's `/upload/image` and writes the returned filename into the
+   *  workflow before submitting. */
+  imageSlots?: Array<{ nodeId: string; inputName: string; data: string }>
+  channelId?: string
+  channel?: string
+  upstream?: string
+  canvas?: CanvasTaskMeta
+  /** Per-widget overrides for ComfyUI workflows. The host runner reads
+   *  this and writes the values back into the workflow JSON
+   *  (`workflow["<nodeId>"].inputs["<inputName>"]`) before submitting.
+   *  Keys take the form `${nodeId}:${inputName}`. */
+  overrides?: Record<string, unknown>
+}
+
+/** Origin information carried by a generation started from the canvas. */
+export interface CanvasTaskMeta {
+  canvasId: string
+  sourceNodeId?: string
+  /** Legacy v1 annotation workflow; kept so old history entries still parse. */
+  annotationNodeId?: string
+  parentNodeId?: string
+  placement?: 'right' | 'below'
+}
+
+/** Generation modes. */
+export type GenerateMode = 'text' | 'edit'
+
+/**
+ * The full generate request the engine accepts (text-to-image and
+ * image-to-image). Round 5 only the workflow-runner path actually drives
+ * this — the studio's free-form composer is gone — but the engine still
+ * types against the full shape so old code paths stay type-safe.
+ */
+export interface GenerateRequest extends EcommerceTaskMeta {
+  mode: GenerateMode
+  model: string
+  prompt: string
+  size: string
+  quality: string
+  n: number
+  detail: string
+  image?: string
+  images?: string[]
+  refName?: string
+  channelId?: string
+  channel?: string
+  upstream?: string
+  comparisonId?: string
+  comparisonModels?: string[]
+  canvas?: CanvasTaskMeta
+  imageSlots?: Array<{ nodeId: string; inputName: string; data: string }>
+  overrides?: Record<string, unknown>
+}
+
 /** Metadata shared by the ecommerce product-set workflow. */
 export interface EcommerceTaskMeta {
   workflow?: 'ecommerce'
@@ -960,8 +835,7 @@ export interface EcommerceTaskMeta {
   slotLabel?: string
 }
 
-/** Role an uploaded product asset plays in the ecommerce workflow. 'none' is
- *  only used as a slot selection meaning "generate without a reference". */
+/** Role an uploaded product asset plays in the ecommerce workflow. */
 export type EcommerceRefRole = 'none' | 'product' | 'packaging' | 'detail' | 'style'
 
 /** One planned image slot in a product set. */
@@ -982,92 +856,91 @@ export interface ProductSetDraft {
   category: string
   platform: string
   language: string
-  /** Custom copy language when language is 'custom'. */
   customLanguage?: string
   size: string
   productName: string
-  /** 参数信息（提示词）: the merged reference-info field (v1.5.9+). */
   promptInfo: string
-  /** Per-image prompt overrides keyed by `slotKey` (`main-1`, `selling-2`…);
-   *  written from the pre-generation preview board. */
   promptOverrides?: Record<string, string>
-  /** Legacy v1.5.9 separate fields; folded into promptInfo on load. */
   sellingPoints?: string
   protectedFeatures?: string
   styleHint?: string
   slots: ProductSetSlot[]
 }
 
-/** A client → host generate request (what the panel collects). */
-export interface GenerateRequest extends EcommerceTaskMeta {
-  /** text-to-image (images/generations) or image-to-image (images/edits). */
-  mode: GenerateMode
-  /**
-   * User-facing model name (an alias from the channel's model catalog). The
-   * host maps it onto the configured channel and fills `upstream` with the
-   * real id before the engine sees it.
-   */
-  model: string
-  /** The prompt. Upstream providers may impose their own length limits. */
-  prompt: string
-  /** Canvas size as an aspect ratio: 'auto' or e.g. '1:1' / '16:9' / '21:9'.
-   *  The host maps it onto each model's own vocabulary (aspect_ratio for Grok
-   *  and Nano Banana, resolution-tier size for Seedream, the closest pixel size for
-   *  OpenAI-compatible endpoints). */
-  size: string
-  /** Clarity tier: 'auto' | '1k' | '2k' | '4k'. The host maps it onto the
-   *  model's own vocabulary (resolution for Grok, image_size for Nano Banana,
-   *  and size for Seedream,
-   *  Nano Banana, quality for OpenAI). */
-  quality: string
-  /** Number of images, 1-4. */
-  n: number
-  /**
-   * Passthrough detail parameter: '' (omit), 'standard', or 'high'. Some
-   * gpt-image-2 gateways expose it; official OpenAI endpoints reject unknown
-   * parameters, so the UI defaults to '' (omit).
-   */
-  detail: string
-  /** Reference image as a data URL (edit mode only). */
-  image?: string
-  /** Additional reference images as data URLs (edit mode only). The first
-   *  image stays in `image`; providers that accept several references get them
-   *  all, single-reference providers see `image` alone. */
-  images?: string[]
-  /** Canvas workflow image inputs (round 4.5). ComfyUI-only: each entry
-   *  names the workflow node + input to fill (`LoadImage.image` and other
-   *  string image widgets) and carries the canvas image as a data URL. The
-   *  host uploads each image to ComfyUI's `/upload/image` and writes the
-   *  returned filename into the workflow before submitting. Other model
-   *  families ignore the field. */
-  imageSlots?: Array<{ nodeId: string; inputName: string; data: string }>
-  /** Original reference-image name, retained in the history entry. */
-  refName?: string
-  /** Channel this request targets (the host falls back to the default when
-   *  absent, and re-routes by model alias when the alias lives elsewhere). */
-  channelId?: string
-  /** Channel display name snapshot, kept on the history entry (host-filled). */
-  channel?: string
-  /** Upstream model id actually sent to the gateway (host-filled from the
-   *  alias mapping; defaults to `model` when absent). */
-  upstream?: string
-  /** Stable client-created id shared by the tasks in one comparison run. */
-  comparisonId?: string
-  /** All model aliases selected for one comparison run. */
-  comparisonModels?: string[]
-  /** Optional canvas lineage metadata. */
-  canvas?: CanvasTaskMeta
-  /** Round 4.3: per-widget overrides for ComfyUI workflows. The host
-   *  runner reads this and writes the values back into the workflow JSON
-   *  (`workflow["<nodeId>"].inputs["<inputName>"]`) before submitting.
-   *  Keys take the form `${nodeId}:${inputName}` so the client can carry
-   *  a flat map without having to know node topology. Non-ComfyUI
-   *  channels ignore the field. */
-  overrides?: Record<string, unknown>
+/** A history image reference as the browser consumes it (a served URL). */
+export interface HistoryImageRef {
+  url: string
+  mime: string
+  revisedPrompt?: string
 }
 
-/** One generated image, normalized host-side to base64 so the browser never
- *  has to fetch the upstream (no CORS, no key exposure). */
+/** A saved generation as the browser consumes it (metadata + served images). */
+export interface HistoryEntry extends EcommerceTaskMeta {
+  id: string
+  createdAt: number
+  mode: GenerateMode
+  model: string
+  prompt: string
+  size: string
+  quality: string
+  detail: string
+  n: number
+  images: HistoryImageRef[]
+  refName?: string
+  tags?: string[]
+  channelId?: string
+  channel?: string
+  comparisonId?: string
+  comparisonModels?: string[]
+  canvas?: CanvasTaskMeta
+}
+
+/** A history entry the client submits for persistence (images still carry base64). */
+export interface HistoryEntryInput extends EcommerceTaskMeta {
+  id: string
+  createdAt: number
+  mode: GenerateMode
+  model: string
+  prompt: string
+  size: string
+  quality: string
+  detail: string
+  n: number
+  images: GeneratedImage[]
+  refName?: string
+  channelId?: string
+  channel?: string
+  comparisonId?: string
+  comparisonModels?: string[]
+  canvas?: CanvasTaskMeta
+}
+
+export type GenerationTaskStatus = 'queued' | 'running' | 'completed' | 'failed' | 'cancelled'
+
+export interface GenerationTask extends EcommerceTaskMeta {
+  id: string
+  request: GenerateRequest
+  status: GenerationTaskStatus
+  createdAt: number
+  startedAt?: number
+  finishedAt?: number
+  result?: GenerateResult
+  error?: string
+}
+
+/** GitHub Release update information shown by the client. */
+export interface UpdateInfo {
+  currentVersion: string
+  latestVersion: string
+  updateAvailable: boolean
+  releaseUrl: string
+  publishedAt?: string
+}
+
+/** Maximum number of history entries retained host-side (oldest evicted). */
+export const HISTORY_MAX = 50
+
+/** One image result the host hands back to the canvas workflow runner. */
 export interface GeneratedImage {
   /** Raw base64 payload (no data: prefix). */
   b64: string
@@ -1077,13 +950,9 @@ export interface GeneratedImage {
   revisedPrompt?: string
 }
 
-/** Successful generate outcome. */
+/** Successful generate outcome (canvas workflow runner consumes this). */
 export interface GenerateResult {
   images: GeneratedImage[]
-  /** Updated host-persisted history, when returned by the generate route. */
-  history?: HistoryEntry[]
-  /** Persistence failure after images were successfully generated. */
-  historyError?: string
   /** ComfyUI-only: prompt ids of the runs just submitted, so the host can
    *  correlate live WS progress with the canvas node that triggered them.
    *  `params` is the final widget snapshot of the first sub-run (seed /
@@ -1142,95 +1011,14 @@ export interface PresetProviderView {
   models: ModelMapping[]
 }
 
-export type GenerationTaskStatus = 'queued' | 'running' | 'completed' | 'failed' | 'cancelled'
-
-export interface GenerationTask extends EcommerceTaskMeta {
-  id: string
-  request: GenerateRequest
-  status: GenerationTaskStatus
-  createdAt: number
-  startedAt?: number
-  finishedAt?: number
-  result?: GenerateResult
-  error?: string
-}
-
-/** GitHub Release update information shown by the client. */
-export interface UpdateInfo {
-  currentVersion: string
-  latestVersion: string
-  updateAvailable: boolean
-  releaseUrl: string
-  publishedAt?: string
-}
-
-/** One history image reference as the browser consumes it (a served URL). */
-export interface HistoryImageRef {
-  /** Same-origin URL: `${HISTORY_API.image}/<file>`. */
-  url: string
-  /** MIME type, e.g. image/png. */
-  mime: string
-  /** Upstream revised prompt, when provided. */
-  revisedPrompt?: string
-}
-
-/** A saved generation as the browser consumes it (metadata + served images). */
-export interface HistoryEntry extends EcommerceTaskMeta {
-  id: string
-  createdAt: number
-  mode: GenerateMode
-  model: string
-  prompt: string
-  size: string
-  quality: string
-  detail: string
-  n: number
-  images: HistoryImageRef[]
-  /** Reference-image filename (edit mode), kept for display only. */
-  refName?: string
-  /** User-managed gallery labels (unused by history entries). */
-  tags?: string[]
-  /** Channel id snapshot (usage counters key by it for new entries). */
-  channelId?: string
-  /** Channel display name snapshot (survives channel deletion). */
-  channel?: string
-  /** Stable id shared by the history entries in one comparison run. */
-  comparisonId?: string
-  /** Model aliases included in the comparison run. */
-  comparisonModels?: string[]
-  canvas?: CanvasTaskMeta
-}
-
-/** A history entry the client submits for persistence (images still carry base64). */
-export interface HistoryEntryInput extends EcommerceTaskMeta {
-  id: string
-  createdAt: number
-  mode: GenerateMode
-  model: string
-  prompt: string
-  size: string
-  quality: string
-  detail: string
-  n: number
-  images: GeneratedImage[]
-  refName?: string
-  /** Channel id snapshot, tallied by the usage endpoint. */
-  channelId?: string
-  /** Channel display name snapshot (survives channel deletion). */
-  channel?: string
-  /** Stable id shared by the history entries in one comparison run. */
-  comparisonId?: string
-  /** Model aliases included in the comparison run. */
-  comparisonModels?: string[]
-  canvas?: CanvasTaskMeta
-}
-
-/** Whether a channel preset id belongs to the ComfyUI family (`comfyui-local`,
- *  `comfyui-remote`, …). ComfyUI presets accept an empty API key because the
- *  local service runs unauthenticated; the panel uses this helper to skip the
- *  "please configure an API key" gate on ComfyUI channels. The same regex
- *  lives in `comfyui-workflows.ts` for the server-side check; keeping a copy
- *  here means the client bundle does not have to import server-only code. */
+/**
+ * Whether a channel preset id belongs to the ComfyUI family (`comfyui-local`,
+ * `comfyui-remote`, …). ComfyUI presets accept an empty API key because the
+ * local service runs unauthenticated; the panel uses this helper to skip the
+ * "please configure an API key" gate on ComfyUI channels. The same regex
+ * lives in `comfyui-workflows.ts` for the server-side check; keeping a copy
+ * here means the client bundle does not have to import server-only code.
+ */
 export function isComfyUiPreset(preset: string): boolean {
   return /^comfyui-/i.test(preset.trim())
 }
