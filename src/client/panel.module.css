@@ -26,100 +26,40 @@
    trailing child; hidden unless the panel is active. */
 [data-dsh-imagegen-view] {
   position: relative;
-  grid-column: 1;
-  grid-row: 1;
   display: none;
   z-index: 60;
+  width: 100%;
+  height: 100%;
   min-width: 0;
   min-height: 0;
+  box-sizing: border-box;
   background: var(--dsw-alias-bg-base);
 }
 
 /* The center column is single-occupant; the :not() guards keep the sibling
    panels (task board / ssh) from fighting over visibility if both activation
-   attributes ever coexist. */
+   attributes ever coexist. Round 5: the panel is canvas-only now, so the
+   whole middle column is one block — the legacy "canvas + chat" three-up
+   grid (and its chat-width resizer) is gone. */
 html[data-dsh-imagegen-active]:not([data-dsh-taskboard-active]):not([data-dsh-ssh-active]) [data-pane='conversation'],
 html[data-dsh-imagegen-active]:not([data-dsh-taskboard-active]):not([data-dsh-ssh-active]) [class*='centerCol'] {
-  display: grid !important;
-  grid-template-columns: minmax(0, 1fr) 8px minmax(320px, clamp(320px, var(--dsh-imagegen-chat-width, 36%), 70%));
-  grid-template-rows: minmax(0, 1fr);
-  gap: 1px;
+  display: flex !important;
   overflow: hidden;
-  background: var(--dsw-alias-border-l1);
 }
 
 html[data-dsh-imagegen-active]:not([data-dsh-taskboard-active]):not([data-dsh-ssh-active]) [data-dsh-imagegen-view] {
   display: block;
 }
 
+/* Hide the DSH native conversation slot — the canvas owns the center column
+   entirely now (Round 5: chat / history / gallery moved out). */
 html[data-dsh-imagegen-active]:not([data-dsh-taskboard-active]):not([data-dsh-ssh-active]) [data-slot='conversation'] {
-  grid-column: 3;
-  grid-row: 1;
-  align-items: stretch;
-  display: flex !important;
-  width: auto;
-  min-width: 0;
-  min-height: 0;
-  overflow: hidden;
-  background: var(--dsw-alias-bg-base);
-}
-
-/* DSH's native conversation root is a flex item with an intrinsic width.
-   Stretch that direct child to the complete chat column so its hero composer
-   can center itself inside the resized pane instead of leaving a blank rail
-   on the right. */
-html[data-dsh-imagegen-active] [data-slot='conversation'] > [data-phase] {
-  align-self: stretch;
-  flex: 1 1 auto;
-  width: 100%;
-  max-width: none;
-  min-width: 0;
-}
-
-html[data-dsh-imagegen-active]:not([data-dsh-taskboard-active]):not([data-dsh-ssh-active]) [data-dsh-imagegen-chat-resizer] {
-  grid-column: 2;
-  grid-row: 1;
-}
-
-.chatResizer {
-  position: relative;
-  z-index: 70;
-  display: none;
-  width: 8px;
-  min-width: 8px;
-  align-items: center;
-  justify-content: center;
-  color: var(--dsw-alias-label-tertiary);
-  background: var(--dsw-alias-border-l1);
-  cursor: col-resize;
-  touch-action: none;
-}
-
-.chatResizer::before {
-  width: 3px;
-  height: 36px;
-  border-radius: 3px;
-  background: currentColor;
-  content: '';
-  opacity: .55;
-}
-
-.chatResizer:hover,
-.chatResizer:focus-visible {
-  color: var(--dsw-alias-brand-primary);
-  outline: none;
-  background: var(--dsw-alias-bg-layer-2);
-}
-
-/* Keep the handle above shell defaults: some skins set display:none on
-   unrecognised children of the conversation frame. */
-html[data-dsh-imagegen-active] [data-dsh-imagegen-chat-resizer] {
-  display: flex !important;
+  display: none !important;
 }
 
 /* Hide only unrelated center-column plugin children. */
-html[data-dsh-imagegen-active]:not([data-dsh-taskboard-active]):not([data-dsh-ssh-active]) [data-pane='conversation'] > :not([data-dsh-imagegen-view]):not([data-slot='conversation']):not([data-dsh-imagegen-chat-resizer]),
-html[data-dsh-imagegen-active]:not([data-dsh-taskboard-active]):not([data-dsh-ssh-active]) [class*='centerCol'] > :not([data-dsh-imagegen-view]):not([data-slot='conversation']):not([data-dsh-imagegen-chat-resizer]) {
+html[data-dsh-imagegen-active]:not([data-dsh-taskboard-active]):not([data-dsh-ssh-active]) [data-pane='conversation'] > :not([data-dsh-imagegen-view]):not([data-slot='conversation']),
+html[data-dsh-imagegen-active]:not([data-dsh-taskboard-active]):not([data-dsh-ssh-active]) [class*='centerCol'] > :not([data-dsh-imagegen-view]):not([data-slot='conversation']) {
   display: none !important;
 }
 
@@ -128,24 +68,6 @@ html[data-dsh-imagegen-active]:not([data-dsh-taskboard-active]):not([data-dsh-ss
    generation owns the frame, without relying on a plugin allow-list. */
 html[data-dsh-imagegen-active] [data-dsh-imagegen-sidebar-root] > :not([data-dsh-imagegen-session-tabs]):not([class*='logoRow']):not([class*='regionArea']):not([class*='footArea']) {
   display: none !important;
-}
-
-@media (max-width: 760px) {
-  html[data-dsh-imagegen-active]:not([data-dsh-taskboard-active]):not([data-dsh-ssh-active]) [data-pane='conversation'],
-  html[data-dsh-imagegen-active]:not([data-dsh-taskboard-active]):not([data-dsh-ssh-active]) [class*='centerCol'] {
-    grid-template-columns: minmax(0, 1fr);
-    grid-template-rows: minmax(0, 1fr) minmax(340px, 0.9fr);
-    overflow-y: auto;
-  }
-
-  html[data-dsh-imagegen-active]:not([data-dsh-taskboard-active]):not([data-dsh-ssh-active]) [data-slot='conversation'] {
-    grid-column: 1;
-    grid-row: 2;
-  }
-
-  html[data-dsh-imagegen-active] [data-dsh-imagegen-chat-resizer] {
-    display: none !important;
-  }
 }
 
 /* --- sidebar entry row ------------------------------------------------------- */
